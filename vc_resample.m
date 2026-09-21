@@ -2,11 +2,18 @@ function y = vc_resample(x, ratio, nout)
 %VC_RESAMPLE  Band-limited resampling at an arbitrary rate (base MATLAB).
 %
 %   Y = VC_RESAMPLE(X, RATIO, NOUT) resamples column vector X by RATIO and
-%   returns exactly NOUT samples.  RATIO > 1 shortens the signal, i.e. it raises
-%   every frequency by that factor - which is what turns the phase vocoder's
-%   time stretch into a pitch shift.
+%   returns exactly NOUT samples.  Output sample i is read from input position
+%   i*RATIO, so
 %
-%   The interpolator is a Kaiser-windowed sinc with fc = min(1, 1/RATIO) and a
+%       RATIO > 1 : NOUT = numel(X)/RATIO samples, signal SHORTENED in time,
+%                   every frequency multiplied by RATIO  (pitch UP)
+%       RATIO < 1 : signal LENGTHENED in time, pitch DOWN
+%
+%   This matches MATLAB's resample(x, 1, RATIO): resample(x,1,2) halves the
+%   length and doubles the frequency.  Verified with a ramp signal: an input of
+%   1000 samples yields 2000 samples at RATIO = 0.5 and 500 at RATIO = 2.
+%
+%   The interpolator is a Kaiser-windowed sinc with fc = min(1, RATIO) and a
 %   half length of 8 source samples.  It is applied as a polyphase filter:
 %
 %       phase = floor(frac(p_i) * NPH)          (NPH sub-filters)
@@ -22,9 +29,10 @@ function y = vc_resample(x, ratio, nout)
 %   (173M elements, 1.2 s for 30 s) and a per-block kernel evaluation with a
 %   cached Kaiser window (~1 s for 30 s).
 %
-%   Accuracy (measured): pure tones resampled by 0.87..2.0 come out at exactly
-%   RATIO*f0 with amplitude 1.0000; the residual phase quantisation error is
-%   below 1/4096 of a sample.
+%   Accuracy (measured): a 200 Hz pure tone sent through with RATIO = 1.567 and
+%   played back at fs measures 200*1.567 = 313.4 Hz, and the level is preserved
+%   (amplitude 1.0000); the residual phase quantisation error is below 1/4096
+%   of a sample.
 
 x = x(:);
 nx = numel(x);

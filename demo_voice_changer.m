@@ -101,6 +101,73 @@ for i = 1:numel(presets)
     end
 end
 
+% ---- timing check: same length does NOT prove the same speed ----------
+% The span of "audible" samples is compared between input and output.  This test
+% exists because the pitch stage once had its stretch and resample directions
+% swapped: the output still had exactly the right number of samples, so every
+% length check passed, while the audio played ~2.4x too fast and its tail was
+% silence.  A span (rather than the burst edges) is used so that a recording
+% with long silent stretches does not look like a timing error.
+tone = zeros(round(4 * fs), 1);
+ta = round(0.60 * fs); tb = round(0.80 * fs);
+tt = (0:numel(tone) - 1).' / fs;
+tone(ta:tb) = 0.7 * sin(2 * pi * 1000 * tt(ta:tb));
+tone = tone + 1e-4 * randn(numel(tone), 1);       % dither, so the vocoder sees signal everywhere
+[s0, e0] = active_span(tone, fs);
+
+for p = {'child', 'elder'}
+    [yt, it] = voice_changer(tone, '--preset', p{1}, '--quiet');
+    [s1, e1] = active_span(yt, fs);
+    ds = abs(s1 - s0);
+    de = abs(e1 - e0);
+    tc = {};
+    if ds > 0.30, tc{end + 1} = sprintf('content start moved %.2f s', ds); end
+    if de > 0.30, tc{end + 1} = sprintf('content end moved %.2f s', de); end
+    fprintf('timing %-9s content %.2f-%.2f s (input %.2f-%.2f), ratio x%.2f | %s\n', ...
+            p{1}, s1, e1, s0, e0, it.pitch_ratio, ternary(isempty(tc), 'OK', 'CHECK'));
+    for k = 1:numel(tc)
+        fprintf('    ! %s\n', tc{k});
+        ok = false;
+    end
+end
+
+% ---- the same check on a real recording, if one is present ------------
+% Real speech is much less periodic than the synthetic vowel and contains silent
+% stretches, so the conversion is verified on it as well.  Any *.wav in the
+% folder is used, preferring one that is not the generated demo file.
+realFiles = dir(fullfile(here, '*.wav'));
+realFiles = realFiles(~strcmp({realFiles.name}, 'demo_voice.wav'));
+realFiles = realFiles(~startsWith({realFiles.name}, 'out_'));
+if ~isempty(realFiles)
+    rn = fullfile(here, realFiles(1).name);
+    [xr, fsr] = audioread(rn);
+    xr = mean(double(xr), 2);
+    xr = xr(1:min(numel(xr), round(20 * fsr)));   % 20 s is enough and keeps it fast
+    [s0, e0] = active_span(xr, fsr);
+    fprintf('\nreal recording "%s": %.1f s @ %g Hz, F0 %.1f Hz, content %.2f-%.2f s\n', ...
+            realFiles(1).name, numel(xr) / fsr, fsr, vc_analyze(xr, fsr).f0, s0, e0);
+    for p = {'child', 'elder'}
+        [yr, ir] = voice_changer(xr, '--preset', p{1}, '--quiet');
+        [s1, e1] = active_span(yr, fsr);
+        % pitch check with a WIDE band here: real speech has a strong formant
+        % structure, so a tight band would let the wrong harmonic answer.
+        wp = ir.f0_in * ir.pitch_ratio;
+        mp = peak_hz(yr, fsr, wp * 0.55, wp * 1.45) / max(ir.f0_in, 1e-9);
+        rc = {};
+        if numel(yr) ~= numel(xr), rc{end + 1} = 'length changed'; end
+        if abs(s1 - s0) > 0.35, rc{end + 1} = sprintf('content start moved %.2f s', abs(s1 - s0)); end
+        if abs(e1 - e0) > 0.35, rc{end + 1} = sprintf('content end moved %.2f s', abs(e1 - e0)); end
+        if any(~isfinite(yr)), rc{end + 1} = 'non-finite samples'; end
+        fprintf('  %-9s F0 %.1f -> %.1f Hz (ratio x%.2f), content %.2f-%.2f s (input %.2f-%.2f), %.0f ms | %s\n', ...
+                p{1}, ir.f0_in, ir.f0_out, ir.pitch_ratio, s1, e1, s0, e0, ...
+                1000 * ir.time_total, ternary(isempty(rc), 'OK', 'CHECK'));
+        for k = 1:numel(rc)
+            fprintf('    ! %s\n', rc{k});
+            ok = false;
+        end
+    end
+end
+
 % ---- A/B identity check: normal preset must be transparent ------------
 % Level normalisation is switched off (and no file is involved), so this
 % measures the algorithm itself: with every conversion factor at 1 the pipeline
@@ -231,4 +298,23 @@ end
 end
 function out = ternary(cond, a, b)
 if cond, out = a; else, out = b; end
+end
+
+% ======================================================================
+function [s, e] = active_span(y, fs)
+%ACTIVE_SPAN  First and last time where the signal carries real energy.
+%   A robust timing metric: it survives silent stretches, a slow fade and the
+%   overlap-add transients at the edges - all of which broke a naive "find the
+%   burst edges" test when it was pointed at a real recording.
+y = double(y(:));
+w = max(1, round(0.02 * fs));
+env = sqrt(filter(ones(w, 1) / w, 1, y .^ 2));
+thr = max(0.08 * max(env), 10 ^ (-50 / 20));    % 8 % of peak, and above -50 dBFS
+i = find(env > thr);
+if isempty(i)
+    s = NaN; e = NaN;
+    return
+end
+s = (i(1) - 1) / fs;
+e = (i(end) - 1) / fs;
 end

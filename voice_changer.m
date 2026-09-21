@@ -153,7 +153,7 @@ end
 lvl = cfg.targetLevelDb;
 
 % ------------------------------------------------------------- input
-[x, fsIn, inName] = load_audio(s.in);
+[x, fsIn, inName] = load_audio(s.in, array_fs(varargin));
 x = double(x);
 if size(x, 2) > 1
     x = mean(x, 2);
@@ -295,12 +295,49 @@ end
 end
 
 % ======================================================================
-function [x, fs, name] = load_audio(in)
+function fs = array_fs(c)
+%ARRAY_FS  Sample rate supplied alongside a numeric input array.
+%   Two accepted forms, both resolved from the raw argument list because the
+%   option parser deliberately drops stray numeric tokens:
+%       voice_changer(x, fs, ...)          second argument, before any option
+%       voice_changer(x, '--fs', fs, ...)  as an option
+fs = [];
+if nargin < 1 || isempty(c) || ~iscell(c)
+    return
+end
+if numel(c) >= 2 && isnumeric(c{2}) && isscalar(c{2}) && c{2} > 0
+    fs = c{2};
+    return
+end
+for k = 1:(numel(c) - 1)
+    if ischar(c{k}) && strcmpi(strrep(c{k}, '-', ''), 'fs') && ...
+            isnumeric(c{k + 1}) && isscalar(c{k + 1}) && c{k + 1} > 0
+        fs = c{k + 1};
+        return
+    end
+end
+end
+
+% ======================================================================
+function [x, fs, name] = load_audio(in, varargin)
 %LOAD_AUDIO  Accept a numeric signal or a file name and normalise the result.
+%   An array input carries no sample rate, so an optional second argument (or
+%   the --fs option) supplies it; a file name is read with audioread, which
+%   reports the rate itself.
 name = '';
 if isnumeric(in) || islogical(in)
     x = double(in);
-    fs = 16000;
+    % An array carries no sample rate, so it has to be given explicitly:
+    %   voice_changer(x, fs, ...)          positional, like audioread
+    %   voice_changer(x, '--fs', fs, ...)  as an option
+    % Getting this wrong is silent and fatal - a 44.1 kHz recording treated as
+    % 16 kHz comes out with every frequency 2.76x off, so the pitch conversion
+    % is applied to the wrong part of the spectrum.
+    if nargin >= 2 && isnumeric(varargin{1}) && isscalar(varargin{1}) && varargin{1} > 0
+        fs = varargin{1};
+    else
+        fs = 16000;
+    end
     return
 end
 fname = char(string(in));

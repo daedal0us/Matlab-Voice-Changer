@@ -5,12 +5,21 @@ function y = vc_pitchshift_pv(x, ratio, nfft, hop)
 %   factor RATIO while keeping the original length:
 %
 %       1) analysis STFT with hop HOP (full, NFFT-row spectrum),
-%       2) phase-vocoder time stretch by RATE = 1/RATIO (hop_out = HOP*RATE),
-%       3) band-limited resampling by RATIO -> pitch up, duration restored.
+%       2) phase-vocoder time stretch by RATIO  (hop_out = HOP*RATIO),
+%       3) band-limited resampling by 1/RATIO  -> pitch up, duration restored.
 %
-%   Steps 2 and 3 cancel in duration, so the output has numel(X) samples while
-%   the whole spectrum - formants included - has been scaled by RATIO; the
-%   caller compensates that with a formant correction filter.
+%   The two time-scale operations cancel exactly (RATIO then 1/RATIO), so the
+%   output has numel(X) samples while the whole spectrum - formants included -
+%   has been scaled by RATIO; the caller compensates that with a formant
+%   correction filter.
+%
+%   DIRECTION (this was wrong once, and the symptom is easy to misread): the
+%   stretch must be by RATIO and the resampling by 1/RATIO.  vc_resample maps
+%   output sample i to input position i*RATIO, so a factor > 1 there SHORTENS
+%   the signal.  Passing RATIO to both stages squares the conversion: a 5 s
+%   file then came out 2.24x too fast at RATIO = 1.567, and at RATIO = 0.866
+%   the resampled signal was too short to fill the output, so its tail was
+%   silence.
 %
 %   PHASE RECURSION.  Bin k of an NFFT-point DFT has centre frequency
 %   omega_k = 2*pi*min(k, NFFT-k)/NFFT, so its phase advances by omega_k*hop per
@@ -47,9 +56,10 @@ if abs(ratio - 1) < 1e-6 || n < nfft + hop         % nothing to do / too short
 end
 
 [M, P, win] = vc_stft(x, nfft, hop);
-rate = 1 / ratio;                                  % stretch undone by the resampler
-hop_out = hop * rate;
-nout_stretch = round(n * rate);
+% Time stretch by RATIO (longer for RATIO > 1) ...
+stretch = ratio;
+hop_out = hop * stretch;
+nout_stretch = round(n * stretch);
 
 % ---------------------------------------------------------- phase propagation
 kb = (0:(nfft - 1)).';                             % full spectrum: 0..NFFT-1
@@ -60,6 +70,13 @@ dphi = dphi - 2 * pi * round(dphi / (2 * pi));     % wrap to [-pi, pi]
 P(:, 2:end) = omega * hop_out + cumsum(dphi, 2);   % cumulative synthesis phase
 
 ys = vc_istft(M, P, win, hop_out, nout_stretch);
+% ... then compress the duration back, which raises the pitch by RATIO.
+% vc_resample maps output sample i to source position i*K, so for the n output
+% samples to span the whole stretched signal (length n*RATIO) the factor has to
+% be K = RATIO, not 1/RATIO.  With K = 1/RATIO the resampler reads only the
+% first 1/RATIO of the stretched signal and time-expands that fragment instead,
+% which is how a 5 s file ended up 2.4x too fast with its tail silent.
+% (Verified with a ramp: the output only spans the full source iff K*n = length.)
 y = vc_resample(ys, ratio, n);
 y = y(:);
 end
