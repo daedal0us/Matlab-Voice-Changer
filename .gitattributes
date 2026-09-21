@@ -1,2 +1,21 @@
-# Auto detect text files and perform LF normalization
+# 自动识别文本文件并做换行符归一化（仓库内统一存 LF）
 * text=auto
+
+# 显式指定：这两个配置文件固定用 LF，避免 Windows 编辑器改成 CRLF 后产生假 diff
+*.gitignore    text eol=lf
+*.gitattributes text eol=lf
+
+# 源码与文档固定 LF
+*.m      text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.json   text eol=lf
+
+# 音频是二进制：禁止任何换行符转换与文本 diff
+*.wav    binary
+*.mp3    binary
+*.flac   binary
+*.m4a    binary
+
+# 二进制文件不做 merge（冲突时取本地，避免损坏）
+*.wav    -merge
