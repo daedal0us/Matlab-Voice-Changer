@@ -7,6 +7,12 @@ function y = vc_istft(M, P, win, hop_out, nout)
 %
 %   HOP_OUT may differ from the analysis hop; that is what turns the
 %   analysis/synthesis pair into a time-scale modification.
+%
+%   The window-energy normalisation is guarded against a near-zero divisor: with
+%   a non-integer hop_out the accumulated window energy is not constant and
+%   collapses at the buffer edges, and dividing by such a value amplified single
+%   samples into spikes hundreds of times larger than the signal (measured peak
+%   380..1152 for a signal whose peak was 0.9, at hop_out = 256*1.567).
 
 nfft = size(M, 1);
 nf   = size(M, 2);
@@ -28,8 +34,19 @@ for k = 1:nf
     wsum(b:e) = wsum(b:e) + w .* w;               % window energy bookkeeping
 end
 
-ok = wsum > 1e-8;
+% Cola normalisation.  The threshold matters: with a NON-integer hop_out the
+% window-energy sum is not constant, and near the buffer ends it falls off.  A
+% near-zero divisor there turns a tiny synthesis value into a spike - measured
+% hundreds of times the signal level (peak 380..1152 where the signal peak was
+% ~0.9) for hop_out values like 256*1.567 and 512*1.567.  Requiring a healthy
+% fraction of the window energy rejects those points instead of amplifying them.
+wmax = max(wsum);
+if wmax <= 0
+    wmax = 1;
+end
+ok = wsum > 0.1 * wmax;
 acc(ok) = acc(ok) ./ wsum(ok);
+acc(~ok) = 0;
 
 if nargin >= 5 && ~isempty(nout)
     if nout <= numel(acc)
