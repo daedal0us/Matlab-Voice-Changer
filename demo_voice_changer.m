@@ -220,25 +220,73 @@ fprintf('  (this test vowel is %.0f Hz, below every floor, so all three are clam
 %           applied factor is target/F0, so the outputs order 210 < 235 < 250 Hz
 %
 % The check is on the APPLIED factor against a low input, because that is what the
-% user hears; the input is synthesized here rather than taken from the test vowel
-% so that it sits in the male range where the old ceilings bound.
-lowf0 = 130;
-[xl, ~] = steady_vowel(fs, 0.8, lowf0, form);
-lf = fullfile(tempdir, 'vc_demo_low.wav');
-audiowrite(lf, xl, fs);
-order = zeros(1, 3);
-for k = 1:3
-    [~, il] = voice_changer(lf, '--preset', pairs{k, 1}, '--quiet');
-    order(k) = il.pitch_ratio * il.pitch_ref;      % the output F0 the driver aims at
+% user hears; the input is synthesized below rather than taken from the test vowel
+% so that it sits in the male range where the old ceilings bound.  Both the low and
+% the high end are exercised: the ceilings own the low end, the direction guard
+% owns the high one.
+for side = 1:2
+    if side == 1
+        sf0 = 130; name = 'male  ';              % ceiling side
+    else
+        sf0 = 240; name = 'female';              % direction-guard side
+    end
+    [xs, ~] = steady_vowel(fs, 0.8, sf0, form);
+    sf = fullfile(tempdir, sprintf('vc_demo_side%d.wav', side));
+    audiowrite(sf, xs, fs);
+    order = zeros(1, 3);
+    for k = 1:3
+        [~, il] = voice_changer(sf, '--preset', pairs{k, 1}, '--quiet');
+        order(k) = il.pitch_ratio * il.pitch_ref;  % the output F0 the driver aims at
+        % Compare against F0_in * 1, not against sf0: the tracked F0 of this vowel
+        % is 239.99.. Hz, so "output < 240" would flag a correct x1.000 run.  The
+        % invariant is about the FACTOR, so express it as one.
+        if order(k) < il.f0_in * (1 - 1e-9)
+            dc2{end + 1} = sprintf('%s lowered a %g Hz input to %.1f Hz', ...
+                                   pairs{k, 1}, sf0, order(k));
+        end
+        if side == 2 && ~il.pitch_down_limited && abs(il.pitch_ratio - 1) < 1e-9 && ...
+                pairs{k, 2} < sf0
+            dc2{end + 1} = sprintf('%s clamped at 1 without flagging it', pairs{k, 1});
+        end
+    end
+    delete(sf);
+    % On the male side the order must be STRICT (that is the inversion bug).  On
+    % the female side it only has to be non-decreasing: above the child targets the
+    % direction guard makes child and child_bright both x1.000, and two presets that
+    % agree on "do not lower the pitch" agreeing exactly is correct behaviour.
+    if side == 1
+        inorder = order(1) < order(2) && order(2) < order(3);
+    else
+        inorder = order(1) <= order(2) && order(2) <= order(3);
+    end
+    if ~inorder
+        dc2{end + 1} = sprintf(['the presets are out of order on a %g Hz input: ' ...
+                                'child %.0f Hz, child_bright %.0f Hz, child_female %.0f Hz ' ...
+                                '(must increase with the target)'], sf0, order(1), order(2), order(3));
+    end
+    fprintf(['  %s-range input %3.0f Hz -> output child %.0f Hz, child_bright %.0f Hz, ' ...
+             'child_female %.0f Hz (must increase, none below the input) | %s\n'], ...
+            name, sf0, order(1), order(2), order(3), ternary(isempty(dc2), 'OK', 'CHECK'));
 end
-delete(lf);
-if ~(order(1) < order(2) && order(2) < order(3))
-    dc2{end + 1} = sprintf(['the presets are out of order on a %g Hz input: ' ...
-                            'child %.0f Hz, child_bright %.0f Hz, child_female %.0f Hz ' ...
-                            '(must increase with the target)'], lowf0, order(1), order(2), order(3));
+
+% --allow-down must restore the raw factor, and say so when it is NOT limited.
+hf = fullfile(tempdir, 'vc_demo_high.wav');
+[xh2, ~] = steady_vowel(fs, 0.8, 240, form);
+audiowrite(hf, xh2, fs);
+[~, ih] = voice_changer(hf, '--preset', 'child', '--quiet');
+[~, ia] = voice_changer(hf, '--preset', 'child', '--allow-down', '--quiet');
+delete(hf);
+if abs(ia.pitch_ratio - ia.pitch_asked) > 1e-9
+    dc2{end + 1} = sprintf('--allow-down gave x%.4f, expected the raw x%.4f', ...
+                           ia.pitch_ratio, ia.pitch_asked);
 end
-fprintf(['  male-range input %g Hz -> output child %.0f Hz, child_bright %.0f Hz, ' ...
-         'child_female %.0f Hz (must increase) | %s\n'], lowf0, order(1), order(2), order(3), ...
+if ia.pitch_down_limited || abs(ih.pitch_ratio - 1) > 1e-9
+    dc2{end + 1} = sprintf(['direction guard misbehaved on 240 Hz: guarded x%.3f, ' ...
+                            '--allow-down x%.3f (limited %d)'], ...
+                           ih.pitch_ratio, ia.pitch_ratio, ia.pitch_down_limited);
+end
+fprintf(['  240 Hz input: guarded x%.3f (flagged %d) -> --allow-down x%.3f | %s\n'], ...
+        ih.pitch_ratio, ih.pitch_down_limited, ia.pitch_ratio, ...
         ternary(isempty(dc2), 'OK', 'CHECK'));
 for k = 1:numel(dc2)
     fprintf('    ! %s\n', dc2{k});
@@ -386,20 +434,27 @@ for c = {'child', 'child_female'}
     end
 end
 
-% explicit override: 0 must disable the ceiling again
-% Note the ratio asserted here is internal consistency, not a fixed number: with
-% --ref auto the ratio is target/detected_f0, so it depends on the input.  What
-% must hold is that the uncapped run reproduces exactly target/reference.
-[~, i0] = voice_changer(x_fem250, fs, '--preset', 'child', '--max-f0', 0, '--quiet');
+% explicit override: 0 must disable the ceiling again.
+% --ref is given a NUMBER here on purpose.  Under --ref auto a 250 Hz input asks
+% for 210/250, which the direction guard now raises to 1, so the uncapped ratio
+% would NOT be target/reference and this check could not tell a working
+% --max-f0 0 from a broken one.  A numeric reference switches the guard off (the
+% caller has stated the assumption the ratio rests on), which is the mode this test
+% is about: does --max-f0 0 hand back the raw target/ref result?
+[~, i0] = voice_changer(x_fem250, fs, '--preset', 'child', '--ref', 150, ...
+                        '--max-f0', 0, '--quiet');
 oc = {};
 if i0.pitch_capped
     oc{end + 1} = '--max-f0 0 should disable the ceiling';
 end
+if i0.pitch_down_limited
+    oc{end + 1} = 'a numeric --ref must not engage the direction guard';
+end
 if abs(i0.pitch_ratio - i0.target_f0 / i0.pitch_ref) > 1e-9
     oc{end + 1} = 'uncapped ratio should equal target/reference';
 end
-fprintf('  --max-f0 0      : 250 Hz in -> x%.3f (capped %d, ref %.1f -> %.0f Hz) | %s\n', ...
-        i0.pitch_ratio, i0.pitch_capped, i0.pitch_ref, i0.f0_in * i0.pitch_ratio, ...
+fprintf('  --max-f0 0      : 250 Hz in, ref %.0f -> x%.3f (capped %d, out %.0f Hz) | %s\n', ...
+        i0.pitch_ref, i0.pitch_ratio, i0.pitch_capped, i0.f0_in * i0.pitch_ratio, ...
         ternary(isempty(oc), 'OK', 'CHECK'));
 for k = 1:numel(oc)
     fprintf('    ! %s\n', oc{k});
