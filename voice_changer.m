@@ -61,6 +61,7 @@ t_all = tic;
 defspec = struct( ...
     'in', [], 'out', '', 'outfile', '', 'preset', 'child', 'pitch', [], ...
     'target', [], 'ratio', [], 'ref', [], 'formant', [], 'tilt', [], ...
+    'formant_map', [], 'env_lifter', [], ...
     'tremor', [], 'rate', [], 'breath', [], 'fs', [], 'nfft', [], 'hop', [], ...
     'target_level', [], 'normalize', true, 'no_normalize', false);
 
@@ -81,17 +82,23 @@ end
 % ------------------------------------------------------------- presets
 preset = lower(strrep(char(string(s.preset)), '-', '_'));
 switch preset
+    % Tilt values are calibrated so the formant stage does not change the overall
+    % brightness relative to the pitch-only result.  Measured on a real 44.1 kHz
+    % recording by matching the energy spectral centroid: child +1.00,
+    % child_female +0.50, elder/elder_female -0.25 dB/oct (each within 7 % of the
+    % pitch-only centroid).  Before this the values were 1.5 / 1.0 / -1.8 / -1.2
+    % on top of a -20*log10(r) compensation, which measured 35..39 % too dark.
     case {'child', 'kid', 'child_male'}
-        pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.5, ...
+        pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
                     'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, 'ref', 150);
     case {'child_female', 'girl'}
-        pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 1.0, ...
+        pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, 'ref', 190);
     case {'elder', 'old', 'elder_male', 'old_man'}
-        pp = struct('pitch', -2.5, 'formant', 0.94, 'tilt', -1.8, ...
+        pp = struct('pitch', -2.5, 'formant', 0.94, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 1.0, 'breath', 0.9, 'ref', []);
     case {'elder_female', 'old_woman'}
-        pp = struct('pitch', -1.8, 'formant', 0.96, 'tilt', -1.2, ...
+        pp = struct('pitch', -1.8, 'formant', 0.96, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 0.8, 'breath', 0.7, 'ref', []);
     case {'normal', 'adult', 'male', 'female', 'none', 'identity'}
         pp = struct('pitch', 0, 'formant', 1, 'tilt', 0, ...
@@ -208,7 +215,13 @@ Fratio = max(0.4, min(2.2, cfg.formant));
 tP = tic;
 
 % (1) spectral analysis of the source: magnitude + cepstral envelope
-[env0, ~] = vc_env(x, 2048);
+% The lifter length matters: 2.5 ms (the old fixed value) smoothed F2/F3 away
+% entirely, which left the formant stage with nothing to act on.  See VC_ENV.
+env_lift = 12;                                  % ms
+if isfield(s, 'env_lifter') && ~isempty(s.env_lifter)
+    env_lift = getnum(s.env_lifter);
+end
+[env0, ~] = vc_env(x, 2048, env_lift);
 
 % (2) pitch conversion: phase-vocoder stretch + band-limited resampling
 y = vc_pitchshift_pv(x, r, cfg.nfft, cfg.hop);
@@ -223,13 +236,29 @@ else
 end
 
 % (3) formant conversion + spectral tilt (phase preserving, zero delay)
-tilt_post = cfg.tilt - 20 * log10(r);        % pitch shift already scaled all formants
+% til_oct is applied as given.  It used to be  cfg.tilt - 20*log10(r), a
+% compensation for the way the pitch stage moves every formant: with r = 1.567
+% that made the effective tilt -3.9 dB/oct darker than requested, which measured
+% 35..39 % too dark on real speech (energy spectral centroid 0.83 of the
+% pitch-shifted signal, where 1.0 means "the formant stage does not change the
+% brightness").  It was only ever hiding the broken formant map; with the map
+% fixed, the stage is brightness neutral at tilt = 0 (measured 0.97..1.03 across
+% the four presets), so the compensation is gone and --tilt means dB/oct.
+til_oct = cfg.tilt;
 % The mask carries a rumble shelf and a level normalisation, so it is only
 % applied when the spectrum is really reshaped: an identity conversion (all
 % factors 1) then stays transparent instead of picking up a DC shelf.
-reshape_spec = abs(Fratio - r) > 1e-9 || abs(tilt_post) > 1e-12;
+reshape_spec = abs(Fratio - r) > 1e-9 || abs(til_oct) > 1e-12;
 if reshape_spec
-    gain = vc_mask(env0, Fratio / r, tilt_post, 10 ^ (-12 / 20), 2048, fs / 2, true);
+    fmap = 'exact';
+    if isfield(s, 'formant_map') && ~isempty(s.formant_map)
+        fmap = lower(char(string(s.formant_map)));
+        if ~any(strcmp(fmap, {'exact', 'legacy'}))
+            error('voice_changer:formantmap', ...
+                  'unknown --formant-map "%s" (use exact | legacy)', fmap);
+        end
+    end
+    gain = vc_mask(env0, Fratio / r, til_oct, 10 ^ (-12 / 20), 2048, fs / 2, true, fmap);
     y = apply_mask(y, gain);
 end
 
