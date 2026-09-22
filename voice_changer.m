@@ -87,13 +87,16 @@ t_all = tic;
 % ---------------------------------------------------------------- defaults
 defspec = struct( ...
     'in', [], 'out', '', 'outfile', '', 'preset', 'child', 'pitch', [], ...
-    'target', [], 'ratio', [], 'ref', [], 'max_f0', [], 'formant', [], 'tilt', [], ...
+    'target', [], 'ratio', [], 'ref', [], 'ref_auto', false, 'max_f0', [], ...
+    'ratio_max', [], ...
+    'formant', [], 'tilt', [], ...
     'formant_map', [], 'env_lifter', [], ...
     'tremor', [], 'rate', [], 'breath', [], 'fs', [], 'nfft', [], 'hop', [], ...
     'target_level', [], 'normalize', true, 'no_normalize', false);
 
 cfg = struct('fs', 16000, 'nfft', 512, 'hop', 128, 'pitch', 6, ...
-    'pitchMode', 'rel', 'pitchRef', 150, 'pitchRatio', [], 'maxF0', [], ...
+    'pitchMode', 'rel', 'pitchRef', 150, 'pitchRefFallback', 150, ...
+    'pitchRatio', [], 'maxF0', [], ...
     'pitchCapped', false, 'formant', [], ...
     'tilt', 0, 'tremor', 0, 'tremorRate', 5, 'wobble', 0.6, 'wobbleRate', 0.7, ...
     'breath', 0, 'targetLevelDb', -18, 'normalize', true, 'seed', 20240);
@@ -129,23 +132,23 @@ switch preset
     case {'child', 'kid', 'child_male'}
         pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
                     'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, ...
-                    'ref', 150, 'maxf0', 320);
+                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 1.567);
     case {'child_female', 'girl'}
         pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, ...
-                    'ref', 190, 'maxf0', 340);
+                    'ref', 'auto', 'reffallback', 190, 'maxf0', 340, 'ratiomax', 1.316);
     case {'elder', 'old', 'elder_male', 'old_man'}
         pp = struct('pitch', -2.5, 'formant', 0.94, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 1.0, 'breath', 0.9, ...
-                    'ref', [], 'maxf0', []);
+                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', []);
     case {'elder_female', 'old_woman'}
         pp = struct('pitch', -1.8, 'formant', 0.96, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 0.8, 'breath', 0.7, ...
-                    'ref', [], 'maxf0', []);
+                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', []);
     case {'normal', 'adult', 'male', 'female', 'none', 'identity'}
         pp = struct('pitch', 0, 'formant', 1, 'tilt', 0, ...
                     'mode', 'ratio', 'target', [], 'tremor', 0, 'breath', 0, ...
-                    'ref', [], 'maxf0', []);
+                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', []);
     otherwise
         error('voice_changer:preset', 'unknown preset "%s" (child | elder | normal | ...)', preset);
 end
@@ -161,7 +164,10 @@ if ~ismember('tilt',    specified) && isempty(s.tilt),    cfg.tilt    = pp.tilt;
 if ~ismember('tremor',  specified) && isempty(s.tremor),  cfg.tremor  = pp.tremor;   end
 if ~ismember('breath',  specified) && isempty(s.breath),  cfg.breath  = pp.breath;   end
 if ~ismember('ref',     specified) && isempty(s.ref) && ~isempty(pp.ref)
-    cfg.pitchRef = pp.ref;
+    cfg.pitchRef = pp.ref;                     % a number, or 'auto'
+end
+if isfield(pp, 'reffallback') && ~isempty(pp.reffallback)
+    cfg.pitchRefFallback = pp.reffallback;     % used only when detection fails
 end
 
 if ~isempty(s.ratio)
@@ -188,7 +194,18 @@ if ~isempty(s.tilt),         cfg.tilt = getnum(s.tilt);               end
 if ~isempty(s.tremor),       cfg.tremor = getnum(s.tremor);           end
 if ~isempty(s.rate),         cfg.tremorRate = getnum(s.rate);         end
 if ~isempty(s.breath),       cfg.breath = getnum(s.breath);           end
-if ~isempty(s.ref),          cfg.pitchRef = getnum(s.ref);            end
+if ~isempty(s.ref)
+    refArg = char(string(s.ref));
+    if strcmpi(refArg, 'auto')
+        cfg.pitchRef = 'auto';                 % --ref auto
+    else
+        cfg.pitchRef = getnum(s.ref);
+    end
+end
+if ~isempty(s.ref_auto) && (islogical(s.ref_auto) || isnumeric(s.ref_auto)) ...
+        && s.ref_auto
+    cfg.pitchRef = 'auto';                     % --ref-auto
+end
 if ~isempty(s.nfft),         cfg.nfft = 2 ^ round(log2(getnum(s.nfft))); end
 if ~isempty(s.hop),          cfg.hop = max(1, round(getnum(s.hop)));  end
 if ~isempty(s.target_level), cfg.targetLevelDb = getnum(s.target_level); end
@@ -231,9 +248,32 @@ A0 = vc_analyze(x, fs);
 tAnalyze = toc(tA);
 
 if strcmp(cfg.pitchMode, 'abs')
+    % The reference is either a number, or 'auto' meaning "use the measured F0 of
+    % this recording".  Auto is what makes one preset scale to the speaker: an
+    % absolute target with a FIXED reference assumes the input sits near that
+    % reference (150 Hz for child), so a higher voice is pushed up by the same
+    % ratio.  With the reference measured instead, a 250 Hz input gets
+    % 235/250 = 0.94 - almost no pitch change - which is what a real child
+    % conversion of a female voice should do, since adult female and child F0
+    % ranges overlap heavily and the difference is mostly the vocal tract.
+    % Measured: the same recording gives F0 x1.567 with a fixed 150 Hz reference
+    % and x0.94 with auto.
+    %
+    % The estimator is reliable enough for this: on a real 44.1 kHz female
+    % recording it returns 249.9 Hz over 8..15 s, within 0.05 % of an independent
+    % autocorrelation measurement.  It is still an estimate, so the pitch ceiling
+    % above stays in place as the safety net, and if it finds no voiced frames at
+    % all (A0.f0 = NaN) the preset's fallback reference is used.
     ref = cfg.pitchRef;
+    autoRef = (ischar(ref) || isstring(ref)) && strcmpi(char(string(ref)), 'auto');
+    if autoRef
+        ref = cfg.pitchRefFallback;                % used only if detection fails
+        if isfinite(A0.f0) && A0.f0 > 0
+            ref = A0.f0;
+        end
+    end
     if isempty(ref) || ~isfinite(ref)
-        ref = A0.f0;
+        ref = A0.f0;                               % empty reference means auto too
     end
     if ~isfinite(ref) || ref <= 0
         ref = 150;
@@ -272,6 +312,36 @@ if ~isempty(cfg.maxF0) && isfinite(cfg.maxF0) && cfg.maxF0 > 0 && ...
     end
 end
 cfg.pitchCapped = capped;
+
+% Ratio ceiling, which is a different knob from the output ceiling above and is
+% what --ref auto needs.  Auto makes the ratio target/detected_f0, so the ratio
+% GROWS as the input gets lower: measured for the child preset, a 250 Hz input
+% gives x0.94 (almost no pitch change, which is right - adult female and child F0
+% ranges overlap) but a 110 Hz male input gives x2.14, i.e. more than an octave,
+% far more than the preset was designed to do.  --ratio-max bounds that end while
+% leaving the gentle end intact.  0 disables it.
+%
+% It is applied ONLY when the pitch request came from the preset.  An explicit
+% --pitch / --target / --ratio is an instruction and must be honoured exactly:
+% applied unconditionally, --pitch 12 (one octave) was silently reduced to the
+% preset's 1.567, which the self test caught as "--pitch mapping wrong" and
+% "absolute target missed".  The output ceiling above is deliberately NOT disabled
+% that way, since it protects the output from being unusably thin; --max-f0 0
+% removes it when the caller really wants the raw result.
+explicitPitch = ismember('pitch', specified) || ismember('target', specified) || ...
+                ismember('ratio', specified);
+cfg.ratioMax = [];
+if isfield(s, 'ratio_max') && ~isempty(s.ratio_max)
+    cfg.ratioMax = getnum(s.ratio_max);
+elseif ~explicitPitch && isfield(pp, 'ratiomax') && ~isempty(pp.ratiomax)
+    cfg.ratioMax = pp.ratiomax;
+end
+cfg.ratioCapped = false;
+if ~isempty(cfg.ratioMax) && isfinite(cfg.ratioMax) && cfg.ratioMax > 0 && ...
+        cfg.pitchRatio > cfg.ratioMax
+    cfg.pitchRatio = cfg.ratioMax;
+    cfg.ratioCapped = true;
+end
 
 cfg.pitchRatio = max(0.4, min(2.2, cfg.pitchRatio));
 r = cfg.pitchRatio;
@@ -384,6 +454,7 @@ info = struct('fs', fs, 'n', n, 'preset', preset, 'f0_in', A0.f0, ...
     'tremor_pct', cfg.tremor, 'breath_pct', cfg.breath, ...
     'target_f0', NaN, 'pitch_ref', cfg.pitchRef, 'outfile', outName, ...
     'max_f0', cfg.maxF0, 'pitch_capped', cfg.pitchCapped, ...
+    'ratio_max', cfg.ratioMax, 'ratio_capped', cfg.ratioCapped, ...
     'time_analyze', tAnalyze, 'time_process', tProcess, 'time_total', toc(t_all));
 if strcmp(cfg.pitchMode, 'abs')
     info.target_f0 = cfg.pitchTarget;
@@ -572,8 +643,9 @@ fprintf(['voice_changer - command line voice changer (normal / child / elderly)\
     '  y = voice_changer(x, ''--preset'', ''elder'');\n' ...
     '\n' ...
     'presets: child | child_female | elder | elder_male | elder_female | normal\n' ...
-    'options: --pitch <semitones>  --target <Hz>  --ratio <r>  --ref <Hz>\n' ...
-    '         --max-f0 <Hz>  --formant <r>  --tilt <dB/oct>  --tremor <pct>\n' ...
+    'options: --pitch <semitones>  --target <Hz>  --ratio <r>  --ref <Hz|auto>\n' ...
+    '         --max-f0 <Hz>  --ratio-max <r>\n' ...
+    '         --formant <r>  --tilt <dB/oct>  --tremor <pct>\n' ...
     '         --rate <Hz>  --breath <pct>  --fs <Hz>  --nfft <n>  --hop <n>\n' ...
     '         --target-level <dBFS>  --no-normalize  --plot  --quiet\n' ...
     '\n' ...

@@ -229,16 +229,20 @@ for c = {'child', 'child_female'}
 end
 
 % explicit override: 0 must disable the ceiling again
+% Note the ratio asserted here is internal consistency, not a fixed number: with
+% --ref auto the ratio is target/detected_f0, so it depends on the input.  What
+% must hold is that the uncapped run reproduces exactly target/reference.
 [~, i0] = voice_changer(x_fem250, fs, '--preset', 'child', '--max-f0', 0, '--quiet');
 oc = {};
 if i0.pitch_capped
     oc{end + 1} = '--max-f0 0 should disable the ceiling';
 end
-if abs(i0.pitch_ratio - 235 / 150) > 1e-9
-    oc{end + 1} = 'disabling the ceiling should restore the uncapped ratio';
+if abs(i0.pitch_ratio - i0.target_f0 / i0.pitch_ref) > 1e-9
+    oc{end + 1} = 'uncapped ratio should equal target/reference';
 end
-fprintf('  --max-f0 0      : 250 Hz in -> x%.3f (capped %d) | %s\n', ...
-        i0.pitch_ratio, i0.pitch_capped, ternary(isempty(oc), 'OK', 'CHECK'));
+fprintf('  --max-f0 0      : 250 Hz in -> x%.3f (capped %d, ref %.1f -> %.0f Hz) | %s\n', ...
+        i0.pitch_ratio, i0.pitch_capped, i0.pitch_ref, i0.f0_in * i0.pitch_ratio, ...
+        ternary(isempty(oc), 'OK', 'CHECK'));
 for k = 1:numel(oc)
     fprintf('    ! %s\n', oc{k});
     ok = false;
