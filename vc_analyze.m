@@ -94,71 +94,32 @@ d    = d ./ (cumsum(d, 1) ./ tau);          % cumulative mean normalised
 d(1, :) = 1;
 
 % ------------------------------------------------------------ F0 per frame
-lag_lo = max(2, floor(fs / fmax));
-lag_hi = min(flen - 1, ceil(fs / fmin));
-track  = NaN(nf, 1);
-if lag_hi > lag_lo + 2
-    band = d(lag_lo:lag_hi, :);
-    [dmin, imin] = min(band, [], 1);
+% The per-frame lag selection is shared with the band-stability probe below, so
+% it lives in a local function rather than inline here.
+[A.f0, A.voiced, A.track] = pick_f0(d, lag_lo_of(fs, fmax), ...
+                                    min(flen - 1, ceil(fs / fmin)), nf, fs, ...
+                                    fmin, fmax, power / flen);
 
-    % Period selection: the first local minimum of the normalised difference
-    % curve.  A dip has to be lower than its neighbours, and an absolute
-    % threshold backstop rejects dips that are not deep enough to count as
-    % periodicity at all; if no such dip exists the global minimum is kept.
-    %
-    % LIMITATION, measured, deliberately left alone.  This rule - and the
-    % relative-to-the-deepest-dip variants tried against it - can select a dip
-    % that is not the fundamental.  On the real male recording used for these
-    % measurements the median global minimum of the difference function sits at
-    % lag 382 (115 Hz) against a true F0 near 148 Hz, and on the child-converted
-    % version of that file, whose output F0 is 210 Hz by construction, the
-    % tracker answers 225..355 Hz depending on the search band.  No simple
-    % threshold made all three of {synthetic vowel, dry recording, converted
-    % recording} correct at once, so the caller is told the number is unreliable
-    % instead of being handed a confident wrong one (see VOICE_CHANGER's
-    % reliability check).  Replacing the detector is a project of its own and
-    % this estimator is used for REPORTING only - the conversion factors do not
-    % depend on it.
-    %
-    % The search band above is the part that did help: a 500 Hz fmax admitted
-    % dips at 980 Hz and 551 Hz that were DEEPER than the true-period dip.
-    dl_ = [band(1, :); band; band(end, :)];      % pad: neighbours of the ends
-    ismin = (band < dl_(1:end - 2, :)) & (band <= dl_(3:end, :));
-    deep  = band < max(0.35, 0.9 * dmin);
-    cand  = ismin & deep;
-    hit   = cumsum(cand, 1) > 0;
-    [anyhit, rel] = max(hit, [], 1);
-    rel(~anyhit) = imin(~anyhit);
-    lag = lag_lo + rel - 1;
-
-    % Parabolic refinement of the dip position.
-    i0 = max(lag - 1, lag_lo);
-    i2 = min(lag + 1, lag_hi);
-    y0 = d(sub2ind(size(d), i0, 1:nf));
-    y1 = d(sub2ind(size(d), lag, 1:nf));
-    y2 = d(sub2ind(size(d), i2, 1:nf));
-    den = y0 - 2 * y1 + y2;
-    dl = zeros(1, nf);
-    g = (i0 < lag) & (lag < i2) & (abs(den) > 1e-12);
-    dl(g) = 0.5 * (y0(g) - y2(g)) ./ den(g);
-    dl = max(-0.5, min(0.5, dl));
-
-    f0f = fs ./ (lag + dl);
-    rms = sqrt(power / flen);               % [1 x nf]
-    % Silence test on an ABSOLUTE scale: a purely relative threshold
-    % (a fraction of the median frame RMS) rejects every frame of a quiet but
-    % perfectly periodic signal - which is exactly what a level-normalised
-    % conversion produces (measured: -42 dBFS output, reported as unvoiced).
-    thr = 10 ^ (-60 / 20);                  % -60 dBFS counts as silence
-    yin = d(sub2ind(size(d), lag, 1:nf));   % YIN value of the selected period
-    voiced = (yin < 0.5) & (rms > thr) & (f0f > fmin) & (f0f < fmax);
-    track(voiced) = f0f(voiced);
-    A.track  = track;
-    A.voiced = mean(voiced);
-    if any(voiced)
-        A.f0 = median(track(voiced));
-    end
-end
+% TWO IDEAS TO JUDGE THE ESTIMATE WERE TRIED HERE AND BOTH FAILED THEIR OWN
+% TESTS.  They are recorded so nobody re-runs them:
+%
+%   * "band stability": re-run the search with a wider fmax and report how far
+%     the answer moves.  Measured 4.49 relative spread on a CLEAN synthetic
+%     120 Hz vowel (its own subharmonic dips move with the band) against 0.006
+%     on a converted signal whose answer was 67 % wrong.  The spread describes
+%     the difference function, not the answer.
+%   * "harmonic support": score the answer against the averaged spectrum with a
+%     comb, either as a 1/k-weighted sum or as a harmonic product spectrum.  The
+%     sum does not discriminate at all (every candidate within 0.6 dB of every
+%     other, clean 120 Hz vowel included); the product is worse - it scored a
+%     clean 120 Hz vowel at -15 dB and preferred 110 Hz, because the partials
+%     near the formant peak are far stronger than the low ones.
+%
+% What replaced them is in VOICE_CHANGER: the output is re-analysed with the
+% search band CENTRED ON THE VALUE THE CONVERSION MUST HAVE PRODUCED.  Finding a
+% periodic dip there is evidence the conversion did its job; failing to find one
+% is reported as "not verifiable" rather than as a measurement.  A tracker loose
+% enough to answer anything cannot confirm anything.
 
 % ------------------------------------------- spectral centroid (per frame)
 cwin  = 0.5 - 0.5 * cos(2 * pi * (0:(flen - 1)).' / flen);
@@ -178,6 +139,75 @@ if ~any(sel)
 end
 if any(sel)
     A.cent = median(cent(sel));
+end
+end
+
+% ======================================================================
+function lo = lag_lo_of(fs, fmax)
+lag_lo = max(2, floor(fs / fmax));
+lo = lag_lo;
+end
+
+% ======================================================================
+function [f0, voiced_frac, track] = pick_f0(d, lag_lo, lag_hi, nf, fs, fmin, fmax, frms)
+%PICK_F0  Median F0, voiced fraction and per-frame track from a normalised
+%   difference function, searched over lags LAG_LO..LAG_HI.
+%
+%   Period selection: the first local minimum of the normalised difference
+%   curve.  A dip has to be lower than its neighbours, and an absolute threshold
+%   backstop rejects dips that are not deep enough to count as periodicity at
+%   all; if no such dip exists the global minimum is kept.
+%
+%   LIMITATION, measured, deliberately left alone.  This rule - and the
+%   relative-to-the-deepest-dip variants tried against it - can select a dip
+%   that is not the fundamental: on the project's male test recording the median
+%   global minimum of the difference function sits at lag 382 (115 Hz) against a
+%   true F0 near 148 Hz.  No simple threshold made synthetic vowel, dry
+%   recording and converted recording all correct at once, so the caller is told
+%   how far the answer MOVES WITH THE SEARCH BAND (A.band_spread) instead of
+%   being handed a confident wrong number.  Replacing the detector is a project
+%   of its own, and this estimator is used for REPORTING only - the conversion
+%   factors do not depend on it.
+track = NaN(nf, 1);
+f0 = NaN;  voiced_frac = 0;
+if lag_hi <= lag_lo + 2
+    return
+end
+band = d(lag_lo:lag_hi, :);
+[dmin, imin] = min(band, [], 1);
+dl_ = [band(1, :); band; band(end, :)];      % pad: neighbours of the ends
+ismin = (band < dl_(1:end - 2, :)) & (band <= dl_(3:end, :));
+deep  = band < max(0.35, 0.9 * dmin);
+cand  = ismin & deep;
+hit   = cumsum(cand, 1) > 0;
+[anyhit, rel] = max(hit, [], 1);
+rel(~anyhit) = imin(~anyhit);
+lag = lag_lo + rel - 1;
+
+% Parabolic refinement of the dip position.
+i0 = max(lag - 1, lag_lo);
+i2 = min(lag + 1, lag_hi);
+y0 = d(sub2ind(size(d), i0, 1:nf));
+y1 = d(sub2ind(size(d), lag, 1:nf));
+y2 = d(sub2ind(size(d), i2, 1:nf));
+den = y0 - 2 * y1 + y2;
+dl = zeros(1, nf);
+g = (i0 < lag) & (lag < i2) & (abs(den) > 1e-12);
+dl(g) = 0.5 * (y0(g) - y2(g)) ./ den(g);
+dl = max(-0.5, min(0.5, dl));
+
+f0f = fs ./ (lag + dl);
+% Silence test on an ABSOLUTE scale: a purely relative threshold (a fraction of
+% the median frame RMS) rejects every frame of a quiet but perfectly periodic
+% signal - which is exactly what a level-normalised conversion produces
+% (measured: -42 dBFS output, reported as unvoiced).
+thr  = 10 ^ (-60 / 20);                 % -60 dBFS counts as silence
+yin  = d(sub2ind(size(d), lag, 1:nf));  % YIN value of the selected period
+voiced = (yin < 0.5) & (frms > thr) & (f0f > fmin) & (f0f < fmax);
+track(voiced) = f0f(voiced);
+voiced_frac = mean(voiced);
+if any(voiced)
+    f0 = median(track(voiced));
 end
 end
 
