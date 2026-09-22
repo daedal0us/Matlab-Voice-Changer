@@ -385,10 +385,22 @@ for k = 1:3
     ct(k) = d_centroid(yy, fs);
 end
 tc = {};
+% Monotonicity is the real assertion: it is what caught the constant offset this
+% check was written for, and it holds with and without phase locking.
 if ~(ct(1) < ct(2) && ct(2) < ct(3))
     tc{end + 1} = 'tilt is not monotone in brightness';
 end
-if (ct(3) / ct(1) - 1) < 0.005
+% The "not dead" floor has to sit BELOW the effect this signal can show.  With
+% the current default child preset (210 Hz / x1.15, so a mask factor of
+% 1.15/1.248 = 0.921 - a very shallow cut) and phase locking on by default, the
+% whole effect is 0.31 % over 4 dB/oct; it was 0.58 % before locking became the
+% default, and 0.9 % before the preset changed.  A floor of 0.5 % therefore
+% failed for a reason that has nothing to do with the tilt knob, which is why it
+% is 0.2 %: enough to catch a dead knob or a constant offset, not enough to
+% fight the signal's own insensitivity.  The calibration on real speech, where
+% this signal's steep rolloff is not in play, is where the tilt's magnitude is
+% actually judged (see README section 5).
+if (ct(3) / ct(1) - 1) < 0.002
     tc{end + 1} = sprintf('tilt has almost no effect (x%.3f over 4 dB/oct)', ct(3) / ct(1));
 end
 fprintf('  tilt --2/0/+2 dB/oct -> centroid %.0f / %.0f / %.0f Hz (x%.3f) | %s\n', ...
@@ -594,6 +606,36 @@ if abs(20 * log10(ratio)) > 0.5
     ok = false;
 end
 
+% ---- phase locking: ON by default, and it must actually do something -----
+% The default rests on A/B LISTENING (it removes most of the metallic character,
+% which is the phase vocoder's phasiness); the physical metrics do not show the
+% improvement, so this check cannot be "locked is better" - it has to be
+% something objective that would catch the lock silently turning into a no-op.
+% The strong signal that survived measurement is per-partial phase wandering on a
+% STATIONARY vowel: the partials of a steady tone must advance at a constant rate
+% frame to frame, and the unlocked recursion does not manage it.  Measured here
+% as the median, over the first ten partials, of the standard deviation of each
+% partial's instantaneous-frequency offset; the locked run is ~2x steadier.
+% A silent no-op (which happened twice while this was developed - a peak test that
+% matched nothing, and regions spanning several partials) fails this check.
+[xs_st, ~] = steady_vowel(fs, 2.0, 148.5, form);
+xs_st = xs_st / max(abs(xs_st)) * 0.5;
+y_L = vc_pitchshift_pv(xs_st, 210 / 150, 1024, 256, true);
+y_U = vc_pitchshift_pv(xs_st, 210 / 150, 1024, 256, false);
+w_L = med_wander(y_L, fs, 1024, 256, 148.5 * (210 / 150));
+w_U = med_wander(y_U, fs, 1024, 256, 148.5 * (210 / 150));
+fprintf('\nphase locking    : per-partial wandering  lock OFF %.2f Hz, lock ON %.2f Hz (%.2fx steadier)\n', ...
+        w_U, w_L, w_U / max(w_L, eps));
+if ~(w_L < 0.7 * w_U)
+    fprintf('    ! phase locking is not reducing phase wandering - has it become a no-op?\n');
+    ok = false;
+end
+% ON and OFF must actually differ, or the switch is doing nothing.
+if isequal(y_U, y_L)
+    fprintf('    ! ON and OFF produce identical output - the switch does nothing\n');
+    ok = false;
+end
+
 % ---- A/B identity check: normal preset must be transparent ------------
 % Level normalisation is switched off (and no file is involved), so this
 % measures the algorithm itself: with every conversion factor at 1 the pipeline
@@ -739,6 +781,35 @@ fprobe = 6500;                              % must stay above fs/2/r = 5714 Hz
 tone = 0.5 * sin(2 * pi * fprobe * t);
 y = vc_resample(tone, r, round(numel(tone) / r));
 dB = 20 * log10(max(sqrt(mean(y .^ 2)), 1e-12) / sqrt(mean(tone .^ 2)));
+end
+
+% ======================================================================
+function sd = med_wander(y, fs, nfft, hop, f0)
+%MED_WANDER  Median, over the first ten partials, of the standard deviation of a
+%   partial's instantaneous-frequency offset.  For a steady tone this should be
+%   near zero: the phase advance between analysis frames is constant for a stable
+%   partial.  A phase vocoder that lets every bin advance independently leaves it
+%   wandering, and that wandering is the objective face of "phasiness".
+y = y(:);
+[M, P, ~] = vc_stft(y, nfft, hop);
+om = 2 * pi * min((0:nfft - 1)', nfft - (0:nfft - 1)') / nfft;
+vals = [];
+for k = 1:10
+    fp = f0 * k;
+    if fp > 0.42 * fs, break; end
+    b0 = round(fp * nfft / fs) + 1;
+    cand = max(2, b0 - 2):min(nfft / 2, b0 + 2);
+    df = [];
+    for m = 2:size(P, 2)
+        [~, i] = max(M(cand, m));
+        kk = cand(i);
+        d = P(kk, m) - P(kk, m - 1) - om(kk) * hop;
+        d = d - 2 * pi * round(d / (2 * pi));
+        df(end + 1) = d / (2 * pi * hop) * fs; %#ok<AGROW>
+    end
+    vals(end + 1) = std(df); %#ok<AGROW>
+end
+sd = median(vals);
 end
 
 % ======================================================================
