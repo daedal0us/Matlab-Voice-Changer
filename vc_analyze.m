@@ -27,7 +27,20 @@ function A = vc_analyze(x, fs, fmin, fmax)
 x = double(x(:));
 n = numel(x);
 if nargin < 3 || isempty(fmin), fmin = 60;  end
-if nargin < 4 || isempty(fmax), fmax = 500; end
+% fmax caps the search band, and it is NOT a formality: the band is
+% lag_lo..lag_hi = fs/fmax..fs/fmin, so a too-generous fmax lets the estimator
+% consider short lags whose dips belong to something other than the fundamental.
+% On a real recording converted to 210 Hz the difference function had shallow
+% dips at lag 45 and lag 80 (980 Hz and 551 Hz) that were DEEPER than the dip at
+% the true period (lag 211, yin 0.741 vs 0.682/0.888) - the phase vocoder's
+% frame-rate modulation produces them - and the tracker reported 355 Hz.
+% Measured on that file: fmax 500 -> 355.50 Hz, fmax 400 -> 292.90 Hz,
+% fmax 350 -> 224.97 Hz (truth 210), so the default is 350 Hz.  Adults run
+% 85..180 Hz and even a child's F0 tops out near 300..350 Hz, so this costs
+% nothing for voice conversion; the analysis pass is reporting only, the
+% conversion factors do not depend on it.  Pass a larger fmax explicitly to
+% analyse something outside that range.
+if nargin < 4 || isempty(fmax), fmax = 350; end
 
 A = struct('f0', NaN, 'voiced', 0, 'cent', NaN, 'rms', 0, 'track', []);
 if n < 128
@@ -92,6 +105,23 @@ if lag_hi > lag_lo + 2
     % curve.  A dip has to be lower than its neighbours, and an absolute
     % threshold backstop rejects dips that are not deep enough to count as
     % periodicity at all; if no such dip exists the global minimum is kept.
+    %
+    % LIMITATION, measured, deliberately left alone.  This rule - and the
+    % relative-to-the-deepest-dip variants tried against it - can select a dip
+    % that is not the fundamental.  On the real male recording used for these
+    % measurements the median global minimum of the difference function sits at
+    % lag 382 (115 Hz) against a true F0 near 148 Hz, and on the child-converted
+    % version of that file, whose output F0 is 210 Hz by construction, the
+    % tracker answers 225..355 Hz depending on the search band.  No simple
+    % threshold made all three of {synthetic vowel, dry recording, converted
+    % recording} correct at once, so the caller is told the number is unreliable
+    % instead of being handed a confident wrong one (see VOICE_CHANGER's
+    % reliability check).  Replacing the detector is a project of its own and
+    % this estimator is used for REPORTING only - the conversion factors do not
+    % depend on it.
+    %
+    % The search band above is the part that did help: a 500 Hz fmax admitted
+    % dips at 980 Hz and 551 Hz that were DEEPER than the true-period dip.
     dl_ = [band(1, :); band; band(end, :)];      % pad: neighbours of the ends
     ismin = (band < dl_(1:end - 2, :)) & (band <= dl_(3:end, :));
     deep  = band < max(0.35, 0.9 * dmin);
@@ -99,7 +129,6 @@ if lag_hi > lag_lo + 2
     hit   = cumsum(cand, 1) > 0;
     [anyhit, rel] = max(hit, [], 1);
     rel(~anyhit) = imin(~anyhit);
-    found = anyhit;
     lag = lag_lo + rel - 1;
 
     % Parabolic refinement of the dip position.

@@ -780,7 +780,19 @@ f0_1 = A1.f0;
 % as periodic).  When its answer is not consistent with the conversion that was
 % actually applied, the readout is reported as unreliable instead of printing a
 % misleading number; the conversion factors above are exact by construction.
-f0_reliable = isfinite(f0_1) && abs(f0_1 - r * A0.f0) <= 0.25 * r * max(A0.f0, 1);
+%
+% The tolerance is wide on purpose.  YIN's "first dip below threshold" rule is a
+% poor fit for a phase-vocoder output: measured on the real male recording used
+% for these checks, the dry file reads 148 Hz while the median global minimum of
+% its difference function sits at lag 382 (115 Hz), and the child-converted file
+% - whose output F0 is 210 Hz by construction - reads 225..355 Hz depending on
+% the search band.  See the LIMITATION note in VC_ANALYZE.  So this check is a
+% sanity band, not a measurement, and the report says which of the two happened:
+% nothing usable was found, or a number was found that disagrees with the
+% conversion that was applied.
+f0_expected = r * A0.f0;
+f0_reliable = isfinite(f0_1) && abs(f0_1 - f0_expected) <= 0.25 * max(f0_expected, 1);
+f0_measured = f0_1;                     % kept for the report, never as the result
 if ~f0_reliable
     f0_1 = NaN;
 end
@@ -798,6 +810,8 @@ end
 
 info = struct('fs', fs, 'n', n, 'preset', preset, 'f0_in', A0.f0, ...
     'f0_out', f0_1, 'pitch_ratio', r, 'formant_ratio', Fratio, ...
+    'f0_expected', f0_expected, 'f0_measured', f0_measured, ...
+    'f0_reliable', f0_reliable, ...
     'formant_scale_applied', Fratio / r, 'tilt_db_oct', cfg.tilt, ...
     'tremor_pct', cfg.tremor, 'breath_pct', cfg.breath, ...
     'target_f0', NaN, 'pitch_ref', cfg.pitchRef, 'outfile', outName, ...
@@ -898,14 +912,15 @@ end
 function print_report(info, inName, A0, args)
 fprintf('\n[voice_changer] preset=%s   in=%s\n', info.preset, ...
         ternary(isempty(inName), '<numeric array>', inName));
-fprintf('  analysis : F0 = %6.1f Hz, voiced %4.0f%%, centroid %5.0f Hz, %.1f ms\n', ...
-        A0.f0, 100 * A0.voiced, A0.cent, 1000 * info.time_analyze);
+fprintf('  analysis : %s, voiced %4.0f%%, centroid %5.0f Hz, %.1f ms\n', ...
+        f0_text(A0.f0, [], true), 100 * A0.voiced, A0.cent, 1000 * info.time_analyze);
 if isfinite(info.target_f0)
     fprintf('  pitch    : F0 x%.3f  (target %.0f Hz)%s  ->  %s\n', ...
-            info.pitch_ratio, info.target_f0, capnote(info), f0_text(info.f0_out));
+            info.pitch_ratio, info.target_f0, capnote(info), ...
+            f0_text(info.f0_out, info, false));
 else
     fprintf('  pitch    : F0 x%.3f%s  ->  %s\n', ...
-            info.pitch_ratio, capnote(info), f0_text(info.f0_out));
+            info.pitch_ratio, capnote(info), f0_text(info.f0_out, info, false));
 end
 fprintf('  formant  : final x%.3f (%s, envelope scaled x%.3f before the pitch shift)\n', ...
         info.formant_ratio, tracknote(info), info.formant_scale_applied);
@@ -944,11 +959,35 @@ else
 end
 end
 
-function s = f0_text(f0)
+function s = f0_text(f0, info, isInput)
+%F0_TEXT  How a measured F0, or the absence of one, is worded in the report.
+%   "unreliable" used to claim the tracker had locked onto a higher harmonic.
+%   That claim was never verified and the measurements do not support it: on the
+%   child-converted test recording the tracker's answer (355 Hz) is simply its
+%   own reading of the waveform, and an independent autocorrelation on the same
+%   signal peaks at a different lag again.  What is certain is that the number
+%   does not match the conversion that was applied, so the report says that and
+%   shows both numbers - a bare "estimate unreliable" left the user with no way
+%   to tell a broken conversion from a bad measurement.
 if isfinite(f0)
     s = sprintf('F0 = %.1f Hz', f0);
+    return
+end
+if isInput
+    s = 'F0 not measurable (no frame passed the voicing test)';
+    return
+end
+meas = NaN;  exp_ = NaN;
+if nargin >= 2 && isstruct(info)
+    if isfield(info, 'f0_measured'), meas = info.f0_measured; end
+    if isfield(info, 'f0_expected'), exp_ = info.f0_expected; end
+end
+if isfinite(meas) && isfinite(exp_)
+    s = sprintf(['F0 not verifiable (the pitch tracker measured %.0f Hz where this ' ...
+        'conversion produces %.0f Hz; it is unreliable on converted audio - see ' ...
+        'VC_ANALYZE)'], meas, exp_);
 else
-    s = 'F0 readout unreliable (tracker locked onto a higher harmonic)';
+    s = 'F0 not verifiable (the pitch tracker found no usable period)';
 end
 end
 

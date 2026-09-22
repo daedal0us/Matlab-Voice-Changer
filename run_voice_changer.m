@@ -156,7 +156,7 @@ catch err
 end
 
 fprintf('[run_voice_changer] done: F0 %s -> %s, pitch x%.3f, formant x%.3f, %.0f ms\n', ...
-        num2str(info.f0_in, '%.1f'), f0_txt(info.f0_out), info.pitch_ratio, ...
+        num2str(info.f0_in, '%.1f'), f0_txt(info), info.pitch_ratio, ...
         info.formant_ratio, 1000 * info.time_total);
 end
 
@@ -180,11 +180,22 @@ end
 end
 
 % ======================================================================
-function s = f0_txt(f0)
-if isfinite(f0)
-    s = sprintf('%.1f Hz', f0);
+function s = f0_txt(info)
+%F0_TXT  The F0 readout for the one-line summary, or why there is none.
+%   "unreliable (estimator limitation)" was accurate but told the user nothing
+%   about which part was unreliable.  Show the tracker's own answer next to the
+%   value the conversion produces, so a poor measurement is never mistaken for a
+%   failed conversion.
+if isfinite(info.f0_out)
+    s = sprintf('%.1f Hz', info.f0_out);
+    return
+end
+if isfield(info, 'f0_measured') && isfinite(info.f0_measured) && ...
+        isfield(info, 'f0_expected') && isfinite(info.f0_expected)
+    s = sprintf('%.0f Hz-measured-but-expected-%.0f (tracker unreliable on converted audio)', ...
+        info.f0_measured, info.f0_expected);
 else
-    s = 'unreliable (estimator limitation)';
+    s = 'not measurable (no voiced frame found)';
 end
 end
 
