@@ -81,7 +81,34 @@ if any(ocol == pcol)
     fprintf('  !! the open button covers the preset dropdown\n');
 end
 
-% 原始 and 变声 must render at the same width.% Component Position is NOT usable here: -batch has no rendered layout, so every
+%% 2c. underscore safety: preset names must not be TeX-interpreted ---------
+% 'child_female' printed into a TeX-interpreted text object renders as
+% child_female with an italic SUBSCRIPT f - a real bug reported from a
+% screenshot.  Two text objects print a preset name: the status label and the
+% axes title, and uiaxes text defaults to TeX.  Check both, with the preset that
+% actually contains an underscore.
+app.PresetDrop.Value = 'child_female';
+app.PresetDrop.ValueChangedFcn(app.PresetDrop, struct());
+fprintf('\npreset child_female -> status "%s"\n', app.StatusLabel.Text);
+fprintf('  interpreters: status "%s", axes title "%s"\n', ...
+    app.StatusLabel.Interpreter, app.Ax.Title.Interpreter);
+if ~strcmp(app.StatusLabel.Interpreter, 'none')
+    ok = false;
+    fprintf('  !! the status label is TeX-interpreted: underscores become subscripts\n');
+end
+if ~strcmp(app.Ax.Title.Interpreter, 'none')
+    ok = false;
+    fprintf('  !! the axes title is TeX-interpreted: underscores become subscripts\n');
+end
+if ~contains(app.StatusLabel.Text, 'child_female')
+    ok = false;
+    fprintf('  !! the preset name did not reach the status label literally\n');
+end
+app.PresetDrop.Value = 'child';
+app.PresetDrop.ValueChangedFcn(app.PresetDrop, struct());
+
+% 原始 and 变声 must render at the same width.
+% Component Position is NOT usable here: -batch has no rendered layout, so every
 % widget reports its default 100 px size.  What CAN be checked is the thing that
 % actually determines the width - an equal number of columns of equal width.
 cA = app.PlayAButton.Layout;  cB = app.PlayBButton.Layout;

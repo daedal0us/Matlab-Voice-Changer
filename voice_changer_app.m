@@ -107,13 +107,12 @@ classdef voice_changer_app < matlab.apps.AppBase
             xlabel(app.Ax, '时间 (s)');
             ylabel(app.Ax, '幅度');
             grid(app.Ax, 'on');
-            % An untouched axes renders as a blank white slab, which reads as
-            % "broken" rather than "empty" (this is what the first screenshot
-            % showed).  The placeholder is the TITLE, not a text object: a text
-            % object is a child of the axes and every plot() call deletes it
-            % (that is how "invalid or deleted object" showed up twice), while
-            % the title survives drawing and is overwritten by the real title.
-            title(app.Ax, '打开一个音频文件以查看波形（灰：原始，橙：变声）');
+            % Preset names contain underscores ('child_female') and uiaxes text
+            % objects are TeX by default, so the underscore is taken as a
+            % SUBSCRIPT: the title rendered "child_female" with an italic f.  The
+            % status label already had Interpreter 'none'; the axes title did not.
+            % All three titles go through setTitle() so it cannot be lost again.
+            app.setTitle('打开一个音频文件以查看波形（灰：原始，橙：变声）');
             % Full scale while empty.  The plotting methods switch YLimMode to
             % manual once there is a measured peak to scale to - on auto, the
             % next draw re-fits the axis and undoes any explicit ylim.
@@ -432,6 +431,17 @@ classdef voice_changer_app < matlab.apps.AppBase
         % pwelch/spectrogram are Signal Toolbox and stay out of this project,
         % and a full-file FFT of a 139 s recording would cost more than the
         % conversion itself.
+        function setTitle(app, s)
+            %SETTITLE  Title text with the TeX interpreter OFF.
+            %   All three titles go through here: the axes default interpreter is
+            %   TeX, and the preset names contain underscores, so 'child_female'
+            %   renders with an italic 'f' subscript unless this is set every
+            %   time (a plain title(...) call with only a string leaves the
+            %   interpreter at whatever the last call set - which is how the
+            %   placeholder lost it).
+            title(app.Ax, s, 'Interpreter', 'none');
+        end
+
         function plotDryOnly(app)
             % plot() replaces the drawn content by itself; do not cla() here,
             % and do not keep a text object in the axes as a placeholder, or it
@@ -441,7 +451,7 @@ classdef voice_changer_app < matlab.apps.AppBase
             pk = max(abs(y));
             [te, ye] = app.envelope(tvec(app.FsDry, numel(y)), y);
             plot(app.Ax, te, ye, 'Color', [0.35 0.35 0.35]);
-            title(app.Ax, sprintf('原始   %.2f s @ %d Hz   ｜   RMS %.4f ｜ 峰值 %.3f', ...
+            app.setTitle(sprintf('原始   %.2f s @ %d Hz   ｜   RMS %.4f ｜ 峰值 %.3f', ...
                 numel(y)/app.FsDry, app.FsDry, sqrt(mean(y.^2)), pk));
             xlabel(app.Ax, '时间 (s)');  ylabel(app.Ax, '幅度');
             xlim(app.Ax, [0 (numel(y)-1)/app.FsDry]);
@@ -460,7 +470,7 @@ classdef voice_changer_app < matlab.apps.AppBase
             end
             hold(app.Ax, 'off');
             legend(app.Ax, {'原始', '变声'}, 'Location', 'northeast');
-            title(app.Ax, sprintf(['原始 %.2f s → 变声 %.2f s ｜ RMS %.4f → %.4f ' ...
+            app.setTitle(sprintf(['原始 %.2f s → 变声 %.2f s ｜ RMS %.4f → %.4f ' ...
                 '｜ 峰值 %.3f → %.3f ｜ %s'], ...
                 nd/app.FsDry, numel(app.Wet)/app.FsWet, ...
                 sqrt(mean(app.Dry.^2)), sqrt(mean(app.Wet.^2)), ...
