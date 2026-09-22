@@ -101,6 +101,58 @@ for i = 1:numel(presets)
     end
 end
 
+% ---- the FIXED formant factor is the default --------------------------
+% This block pins the decision recorded in VOICE_CHANGER's FORMANTS header: the
+% child presets use their fixed design factor and do NOT scale it with the pitch
+% unless --formant-track is given.  The tracking mode was dropped as a default
+% because the test that turns it on compares the RAW pitch ratio against the
+% preset's design ratio and has almost no margin on real speech; on a 138 s male
+% recording it sat only +1.2 % above the threshold and flipped between the design
+% factor and the 1.30 clamp depending on the 4 s window.  Nothing here is audible
+% (the factor moves 1.2 %), so what this check really protects is reproducibility:
+% the same file must give the same formant factor every run.
+% The test vowel is 120 Hz, well below the child preset's 150 Hz design point, so
+% its raw ratio is about 1.96 - the region where tracking WOULD have engaged.  If
+% the default ever flips back, this check fails.
+dc = {};
+[yfix, ifix] = voice_changer(x, '--preset', 'child', '--quiet');
+if ifix.formant_tracked
+    dc{end + 1} = 'child preset scaled the formant factor by default';
+end
+if abs(ifix.formant_ratio - 1.22) > 1e-6
+    dc{end + 1} = sprintf('child default formant x%.3f, expected the fixed x1.220', ...
+                          ifix.formant_ratio);
+end
+[ytrk, itrk] = voice_changer(x, '--preset', 'child', '--formant-track', '--quiet');
+if ~itrk.formant_tracked
+    dc{end + 1} = '--formant-track did not engage on a 120 Hz input';
+elseif itrk.formant_ratio <= ifix.formant_ratio
+    dc{end + 1} = sprintf('--formant-track gave x%.3f, not above the fixed x%.3f', ...
+                          itrk.formant_ratio, ifix.formant_ratio);
+end
+% A live output stream means the two modes really produced different audio rather
+% than only different bookkeeping.
+if max(abs(ytrk - yfix)) <= 1e-9
+    dc{end + 1} = '--formant-track produced identical audio to the fixed default';
+end
+% The old spelling must still parse (and leave the output file argument intact).
+[yold, iold] = voice_changer(x, '--preset', 'child', '--no-formant-track', '--quiet');
+if iold.formant_tracked || abs(iold.formant_ratio - 1.22) > 1e-6
+    dc{end + 1} = '--no-formant-track no longer means the fixed factor';
+end
+if max(abs(yold - yfix)) > 1e-9
+    dc{end + 1} = '--no-formant-track changed the output';
+end
+fprintf('  default  child: formant x%.3f fixed | --formant-track: x%.3f | --no-formant-track: x%.3f | %s\n', ...
+        ifix.formant_ratio, itrk.formant_ratio, iold.formant_ratio, ...
+        ternary(isempty(dc), 'OK', 'CHECK'));
+for k = 1:numel(dc)
+    fprintf('    ! %s\n', dc{k});
+end
+if ~isempty(dc)
+    ok = false;
+end
+
 % ---- formant stage: the knob must actually move the formants -----------
 % This block exists because the formant stage was silently inert for a while:
 % the frequency map moved everything above 640 Hz DOWN regardless of the factor,
@@ -156,13 +208,13 @@ for p = {'child', 'elder'}
     cb = d_centroid(yb, fs);
     drel = cb / cp - 1;
     bc = {};
-    % The bound is 40 % rather than 25 % because the formant factor now TRACKS the
-    % pitch factor (see VOICE_CHANGER): this test vowel is 120 Hz, well below the
-    % child preset's design point, so the tracker raises the factor to its 1.30
-    % ceiling and the formant stage legitimately moves the spectrum more than the
-    % fixed 1.22 did.  What this check is really guarding against is the old
-    % double compensation, which was 35..39 % too dark, plus any change that makes
-    % the stage wildly brighter or darker.
+    % The bound is 40 % rather than 25 % because the mask that implements the
+    % formant factor is a compromise across signal types: exact brightness
+    % neutrality is not achievable, and tracking (now opt-in, see VOICE_CHANGER)
+    % can push the factor to its 1.30 ceiling, which legitimately moves the
+    % spectrum further than the fixed 1.22 does.  What this check is really
+    % guarding against is the old double compensation, which was 35..39 % too
+    % dark, plus any change that makes the stage wildly brighter or darker.
     if abs(drel) > 0.40
         bc{end + 1} = sprintf('formant stage shifts brightness by %+.0f%%', 100 * drel);
     end

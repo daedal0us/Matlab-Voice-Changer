@@ -31,12 +31,14 @@ function [y, info] = voice_changer(varargin)
 %                             pushed proportionally higher and thin out.  The
 %                             ceiling only ever lowers the ratio.  Use 0 to
 %                             disable it.
-%     --formant <r>           final formant factor.  Default: the child presets
-%                             scale their design factor with the pitch factor
-%                             (see FORMANTS below), everything else uses the
-%                             pitch ratio.
-%     --no-formant-track      keep the preset's fixed formant factor instead of
-%                             scaling it with the pitch factor
+%     --formant <r>           final formant factor.  Default: the preset's fixed
+%                             design factor for the child presets (1.22 / 1.18),
+%                             the pitch ratio for everything else.
+%     --formant-track         opt in to scaling the child preset's design factor
+%                             with the pitch factor (see FORMANTS below).
+%                             Off by default; --no-formant-track is accepted as a
+%                             no-op so existing command lines keep working, and it
+%                             never beats an explicit --formant-track.
 %     --tilt    <dB/oct>      spectral tilt about 1 kHz (brightness)
 %     --tremor  <pct>         tremor depth in percent of F0 (elderly)
 %     --rate    <Hz>          tremor rate (default 5)
@@ -66,27 +68,31 @@ function [y, info] = voice_changer(varargin)
 %     filtering vc_mask           envelope warp + tilt + rumble, one FFT pass
 %
 %   ---------------------------------------------------------------------
-%   ---------------------------------------------------------------------
-%   FORMANTS (the child presets scale the vocal tract with the pitch)
-%   A single fixed formant factor cannot be right for every input once the pitch
-%   factor adapts to the speaker.  The child preset's 1.22 was chosen for its
-%   design point (a 150 Hz input, ratio 235/150 = 1.567), where it produces the
-%   roughly 20 % shorter vocal tract that makes a male voice sound child-like.
-%   With an automatic reference the ratio varies, so the factor scales with it:
+%   FORMANTS (the child presets use a FIXED design factor by default)
+%   The child presets carry a fixed formant factor - 1.22 and 1.18, the roughly
+%   20 % shorter vocal tract that makes an adult voice sound child-like - and
+%   that fixed value is the DEFAULT.  The design point is a 150 Hz input at
+%   ratio 235/150 = 1.567, but the factor itself does not move with the ratio:
+%   it is a vocal tract shape, so it stays put.
 %
-%       formant = formant0 * (pitchRatio / r0),  clamped to [1.00, 1.30]
-%
-%   and only for pitchRatio >= r0.  Measured:
-%       110 Hz in -> ratio 1.567 -> formant 1.300  (clamped; F1 700 -> 910 Hz)
-%       150 Hz in -> ratio 1.567 -> formant 1.220  (the design point, unchanged)
-%       250 Hz in -> ratio 0.940 -> formant 1.220  (held, not scaled down)
-%   The factor is deliberately NOT scaled below the design point: a female voice's
-%   formants are already high, and shrinking them would move away from a child
-%   rather than towards one.  --no-formant-track restores the fixed value and an
-%   explicit --formant always wins.
-%   It reads the RAW pitch ratio, before the ratio ceiling clamps it: reading the
-%   clamped value made a female input's true 0.94 look like 1.567 and produced a
-%   factor of 1.000, i.e. no tract change at all.
+%   DECISION: an experimental --formant-track mode scaled the factor with the
+%   pitch (formant = formant0 * (ratio / r0), clamped to [1.00, 1.30], applied
+%   only for ratio >= r0) so that the tract would follow the pitch when the
+%   automatic reference moved the ratio.  It is NOT the default and is opt-in:
+%   on real speech a fixed 1.22 tracked to 1.235, i.e. 1.2 % away, with 0.26..0.43
+%   dB band-energy differences - the pitch already dominates the perceived age, so
+%   the scaling bought nothing audible.  What it did buy was instability: the
+%   tracking test compares the RAW pitch ratio against the preset's design ratio
+%   r0, and on a 138 s male recording (F0 148.2 Hz, raw ratio 1.5856 vs
+%   r0 = 1.5667, only +1.2 % above it) the per-4 s-window ratios ranged
+%   1.068..1.785 with 2 of 5 windows above the threshold, so the decision flipped
+%   the factor between 1.22 and the 1.30 clamp (F1 854 vs 910 Hz) from run to run.
+%   The fixed factor has no such decision to get wrong.  --formant-track opts
+%   back in, --no-formant-track is accepted as a no-op for old command lines, and
+%   an explicit --formant always wins over both.
+%   When tracking is on it reads the RAW pitch ratio, before the ratio ceiling
+%   clamps it: reading the clamped value made a female input's true 0.94 look like
+%   1.567 and produced a factor of 1.000, i.e. no tract change at all.
 %
 %   ---------------------------------------------------------------------
 %   TIMING (decision recorded here because it used to be enforced as a rule)
@@ -116,7 +122,7 @@ t_all = tic;
 defspec = struct( ...
     'in', [], 'out', '', 'outfile', '', 'preset', 'child', 'pitch', [], ...
     'target', [], 'ratio', [], 'ref', [], 'ref_auto', false, 'max_f0', [], ...
-    'ratio_max', [], 'no_formant_track', false, ...
+    'ratio_max', [], 'formant_track', false, 'no_formant_track', false, ...
     'formant', [], 'tilt', [], ...
     'formant_map', [], 'env_lifter', [], ...
     'tremor', [], 'rate', [], 'breath', [], 'fs', [], 'nfft', [], 'hop', [], ...
@@ -125,7 +131,7 @@ defspec = struct( ...
 cfg = struct('fs', 16000, 'nfft', 512, 'hop', 128, 'pitch', 6, ...
     'pitchMode', 'rel', 'pitchRef', 150, 'pitchRefFallback', 150, ...
     'formantTrack', false, 'formantMin', 1.00, 'formantMax', 1.30, 'formantDamp', 1, ...
-    'pitchRatio', [], 'maxF0', [], ...
+    'pitchRatio', [], 'pitchRawRatio', [], 'maxF0', [], ...
     'pitchCapped', false, 'formant', [], ...
     'tilt', 0, 'tremor', 0, 'tremorRate', 5, 'wobble', 0.6, 'wobbleRate', 0.7, ...
     'breath', 0, 'targetLevelDb', -18, 'normalize', true, 'seed', 20240);
@@ -195,8 +201,8 @@ getnum = @(v) str2double(char(string(v)));
 % Precedence of the pitch anchor: --ratio > --target > --pitch > preset.
 if ismember('pitch', specified) || ~isempty(s.pitch), cfg.pitch = getnum(s.pitch);   end
 % Presets that carry a design formant factor (formant0) are handled by the
-% tracking block further down, which also owns restoring the fixed value when
-% tracking is switched off - so they must not be assigned here.
+% tracking block further down, which owns both the fixed default and the opt-in
+% --formant-track scaling - so they must not be assigned here.
 if ~ismember('formant', specified) && isempty(s.formant) && ...
         (~isfield(pp, 'formant0') || isempty(pp.formant0))
     cfg.formant = pp.formant;
@@ -388,34 +394,60 @@ end
 cfg.pitchRatio = max(0.4, min(2.2, cfg.pitchRatio));
 r = cfg.pitchRatio;
 
-% Formant factor scales WITH the pitch factor (--formant-track, on for the child
-% presets).  A single fixed formant factor cannot be right for every input once
-% the pitch factor adapts to the speaker: the preset's 1.22 was chosen for its
-% design point (a 150 Hz input, ratio 1.567), where it gives the ~20 % shorter
-% vocal tract that makes a male voice sound child-like.  With an automatic
-% reference the ratio varies, and a female input needs 235/250 = 0.94 - at which
-% point a fixed 1.22 would enlarge the vocal tract by 22 % while the pitch barely
-% moves, which is the opposite of a child.  Scaling keeps the two consistent:
+% Formant factor.  DEFAULT IS FIXED: the child presets use their design factor
+% (1.22 / 1.18) unchanged, no matter what the automatic reference did to the
+% pitch ratio, because that factor is a vocal tract shape and the pitch already
+% carries the perceived age.  --formant-track opts in to scaling it with the
+% pitch factor:
 %
 %     formant = formant0 * (r / r0)^damping        clamped to [min, max]
 %
-% damping 1 means the vocal tract follows the pitch exactly; 0 reproduces the old
-% fixed behaviour.  The clamp keeps the result inside the range a real child's
-% vocal tract can produce (roughly 15..35 % shorter than an adult's).
-% It uses the RAW pitch ratio (before the ratio ceiling clamps it) and only scales
-% inside the region the preset was designed for, r >= r0.  Using the clamped ratio
-% was wrong: with auto plus a ceiling a female input's true 0.94 became 1.567, so
-% the factor came out 1.000 - i.e. no tract change at all.  Below the design point
-% (r < r0) the factor stays at formant0 rather than scaling down further, because
-% a female voice's formants are already high; scaling them down to 1.22*0.94 = 1.15
-% would put F1 near 1000*1.15, past what a child's tract produces.
-trackWanted = true;
+% damping 1 means the vocal tract follows the pitch exactly; 0 reproduces the
+% default fixed behaviour.  The clamp keeps the result inside the range a real
+% child's vocal tract can produce (roughly 15..35 % shorter than an adult's).
+%
+% WHY FIXED IS THE DEFAULT - it is not a numerical preference but a stability one:
+% the tracking test compares the RAW pitch ratio against the preset's design ratio
+% r0, and that comparison has almost no margin on real speech.  Measured on a
+% 138 s male recording (detected F0 148.2 Hz, raw ratio 1.5856, preset r0 1.5667,
+% i.e. only +1.2 % above the threshold) the ratio computed over 4 s windows ranged
+% 1.068..1.785 with 2 of 5 windows above r0, so the factor flipped between the
+% design value and the 1.30 clamp (F1 854 vs 910 Hz) depending on the window and
+% the run.  Where tracking did engage it moved the factor 1.220 -> 1.235, i.e.
+% 1.2 %, for 0.26..0.43 dB of band energy - inaudible next to the phase
+% vocoder's own colouration, and paid for with a run-to-run decision that can
+% change the result.  The fixed factor has no decision to get wrong; it also
+% removes one place where the formant stage and the pitch stage could disagree.
+% Details and the full measurement are in the FORMANTS header block.
+trackWanted = false;
+if isfield(s, 'formant_track') && ~isempty(s.formant_track)
+    v = s.formant_track;
+    if ischar(v) || isstring(v)
+        trackWanted = any(strcmpi(char(string(v)), {'on', 'true', '1', 'yes'}));
+    elseif islogical(v) || isnumeric(v)
+        trackWanted = logical(v);
+    end
+end
 if isfield(s, 'no_formant_track') && ~isempty(s.no_formant_track)
     v = s.no_formant_track;
+    noTrack = false;
     if ischar(v) || isstring(v)
-        trackWanted = ~any(strcmpi(char(string(v)), {'on', 'true', '1', 'yes'}));
+        noTrack = any(strcmpi(char(string(v)), {'on', 'true', '1', 'yes'}));
     elseif islogical(v) || isnumeric(v)
-        trackWanted = ~logical(v);
+        noTrack = logical(v);
+    end
+    if noTrack
+        % kept so old command lines ("--no-formant-track") still parse and mean
+        % what they always meant; it is now the default, so it is a no-op
+        if trackWanted
+            % Contradictory request.  --formant-track wins because it is the only
+            % one of the two that asks for something other than the default; the
+            % warning exists so the run is not silently surprising.
+            warning('voice_changer:formantTrack', ...
+                    ['--formant-track and --no-formant-track both given; ' ...
+                     '--formant-track wins']);
+        end
+        trackWanted = false;
     end
 end
 formantArgGiven = ismember('formant', specified) || ~isempty(s.formant);
@@ -433,7 +465,7 @@ elseif isfield(pp, 'formant0') && ~isempty(pp.formant0)
         cfg.formant = max(cfg.formantMin, min(cfg.formantMax, ftr));
         cfg.formantTrack = true;
     else
-        cfg.formant = pp.formant0;
+        cfg.formant = pp.formant0;             % the default: fixed design factor
     end
 end
 
@@ -545,6 +577,7 @@ info = struct('fs', fs, 'n', n, 'preset', preset, 'f0_in', A0.f0, ...
     'tremor_pct', cfg.tremor, 'breath_pct', cfg.breath, ...
     'target_f0', NaN, 'pitch_ref', cfg.pitchRef, 'outfile', outName, ...
     'max_f0', cfg.maxF0, 'pitch_capped', cfg.pitchCapped, ...
+    'pitch_raw_ratio', cfg.pitchRawRatio, ...
     'ratio_max', cfg.ratioMax, 'ratio_capped', cfg.ratioCapped, ...
     'formant_tracked', cfg.formantTrack, ...
     'time_analyze', tAnalyze, 'time_process', tProcess, 'time_total', toc(t_all));
@@ -647,8 +680,8 @@ else
     fprintf('  pitch    : F0 x%.3f%s  ->  %s\n', ...
             info.pitch_ratio, capnote(info), f0_text(info.f0_out));
 end
-fprintf('  formant  : final x%.3f (envelope scaled x%.3f before the pitch shift)\n', ...
-        info.formant_ratio, info.formant_scale_applied);
+fprintf('  formant  : final x%.3f (%s, envelope scaled x%.3f before the pitch shift)\n', ...
+        info.formant_ratio, tracknote(info), info.formant_scale_applied);
 fprintf('  tilt     : %+.2f dB/oct     tremor: %.2f%%     breath: %.2f%%\n', ...
         info.tilt_db_oct, info.tremor_pct, info.breath_pct);
 fprintf('  timing   : total %.0f ms  (analysis %.0f ms + processing %.0f ms)  fs=%g Hz, %.2f s audio\n', ...
@@ -684,6 +717,18 @@ if isfinite(f0)
     s = sprintf('F0 = %.1f Hz', f0);
 else
     s = 'F0 readout unreliable (tracker locked onto a higher harmonic)';
+end
+end
+
+function s = tracknote(info)
+%TRACKNOTE  Says which formant behaviour produced the factor in the report.
+%   "fixed" is the default (the preset's design factor); "tracked" only appears
+%   when --formant-track actually engaged, so a run that used the experimental
+%   mode is never mistaken for a default one.
+if isfield(info, 'formant_tracked') && info.formant_tracked
+    s = 'tracked with the pitch';
+else
+    s = 'fixed';
 end
 end
 
@@ -737,7 +782,7 @@ fprintf(['voice_changer - command line voice changer (normal / child / elderly)\
     'presets: child | child_female | elder | elder_male | elder_female | normal\n' ...
     'options: --pitch <semitones>  --target <Hz>  --ratio <r>  --ref <Hz|auto>\n' ...
     '         --max-f0 <Hz>  --ratio-max <r>\n' ...
-    '         --formant <r>  --tilt <dB/oct>  --tremor <pct>\n' ...
+    '         --formant <r>  --formant-track  --tilt <dB/oct>  --tremor <pct>\n' ...
     '         --rate <Hz>  --breath <pct>  --fs <Hz>  --nfft <n>  --hop <n>\n' ...
     '         --target-level <dBFS>  --no-normalize  --plot  --quiet\n' ...
     '\n' ...
