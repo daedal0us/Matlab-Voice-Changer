@@ -153,6 +153,46 @@ if ~isempty(dc)
     ok = false;
 end
 
+% ---- the mellow child preset is a PAIR of factors, not a lower target ----
+% A child has both a higher voice and a shorter vocal tract, but not by the same
+% amount: the tract ratio is roughly 1.14..1.25 while the F0 ratio is 1.5..2.0, so
+% the formant factor must stay SMALLER than the pitch factor.  Dropping the target
+% without dropping the formant factor with it leaves the tract sounding smaller
+% than the pitch implies = thin and synthetic, which is the complaint child_soft
+% exists to answer.  This check asserts the pair and the 1024/256 frame size the
+% child presets rely on (see VOICE_CHANGER).
+dc2 = {};
+% The ratios are asserted against each preset's own DESIGN REFERENCE, not against
+% the 120 Hz test vowel.  With the automatic reference the child presets clamp the
+% pitch ratio at their design value (1.567 / 1.316) as soon as the input is below
+% it, which is exactly why a 120 Hz input gives x1.567 rather than 235/120.  Making
+% the check use the test vowel's own F0 would assert the clamp, not the preset.
+pairs = {'child', 235, 150, 1.22; 'child_soft', 210, 150, 1.15; 'child_female', 250, 190, 1.18};
+for k = 1:size(pairs, 1)
+    want = pairs{k, 2} / pairs{k, 3};
+    [~, ip] = voice_changer(x, '--preset', pairs{k, 1}, '--quiet');
+    bad = abs(ip.pitch_ratio - want) > 0.02 || abs(ip.formant_ratio - pairs{k, 4}) > 1e-6;
+    if abs(ip.pitch_ratio - want) > 0.02
+        dc2{end + 1} = sprintf('%s pitch x%.3f, expected x%.3f (%g/%g design point)', ...
+                               pairs{k, 1}, ip.pitch_ratio, want, pairs{k, 2}, pairs{k, 3});
+    end
+    if abs(ip.formant_ratio - pairs{k, 4}) > 1e-6
+        dc2{end + 1} = sprintf('%s formant x%.3f, expected x%.3f', ...
+                               pairs{k, 1}, ip.formant_ratio, pairs{k, 4});
+    end
+    if ip.formant_ratio >= ip.pitch_ratio
+        dc2{end + 1} = sprintf('%s scales the tract as much as the pitch (x%.2f >= x%.2f)', ...
+                               pairs{k, 1}, ip.formant_ratio, ip.pitch_ratio);
+    end
+    fprintf('  %-13s design %3.0f/%3.0f Hz -> pitch x%.3f, formant x%.3f (tract < pitch) | %s\n', ...
+            pairs{k, 1}, pairs{k, 2}, pairs{k, 3}, ip.pitch_ratio, ip.formant_ratio, ...
+            ternary(bad, 'CHECK', 'OK'));
+end
+for k = 1:numel(dc2)
+    fprintf('    ! %s\n', dc2{k});
+    ok = false;
+end
+
 % ---- formant stage: the knob must actually move the formants -----------
 % This block exists because the formant stage was silently inert for a while:
 % the frequency map moved everything above 640 Hz DOWN regardless of the factor,
@@ -397,6 +437,29 @@ if ~isempty(realFiles)
     end
 end
 
+% ---- the resampler must actually anti-alias when it decimates ---------
+% vc_resample reads output sample i from input position i*RATIO, which for
+% RATIO > 1 SKIPS input samples - decimation.  Its cutoff used to be
+% min(1, ratio), i.e. no attenuation at all on that path, and since
+% vc_pitchshift_pv finishes with vc_resample(ys, ratio, n) that is exactly the
+% pitch-UP case every child conversion takes.  Everything between the output
+% Nyquist and the input Nyquist then folded back into 3..5 kHz, on top of F3/F4.
+%
+% The probe is a tone just above the post-decimation Nyquist, where the two
+% behaviours differ by measurement rather than by argument: 16 kHz at ratio 1.567
+% puts the output Nyquist at 5105 Hz, so a 6000 Hz tone must be removed.  Measured
+% RMS relative to the input tone: -0.2 dB with the old cutoff (the tone passed
+% straight through, i.e. 21 dB of it folded into the band) against -21.0 dB now.
+% A spectrogram of a pitch-up conversion shows the same thing as a band of folded
+% energy, so this check is the cheap proxy for it.
+d_aa = resample_alias_check();
+fprintf('\nresampler anti-alias: 6 kHz tone at pitch ratio 1.567 (output Nyquist %.0f Hz) leaves %.1f dB\n', ...
+        (fs / 2) / 1.567, d_aa);
+if d_aa > -14
+    fprintf('    ! folded energy is not being filtered (expected below -14 dB)\n');
+    ok = false;
+end
+
 % ---- A/B identity check: normal preset must be transparent ------------
 % Level normalisation is switched off (and no file is involved), so this
 % measures the algorithm itself: with every conversion factor at 1 the pipeline
@@ -527,6 +590,20 @@ end
 end
 function out = ternary(cond, a, b)
 if cond, out = a; else, out = b; end
+end
+
+% ======================================================================
+function dB = resample_alias_check()
+%RESAMPLE_ALIAS_CHECK  Energy that survives a decimation outside the output band.
+%   Returns the RMS of the resampled out-of-band tone relative to the tone that
+%   went in, in dB.  A decimator with no low-pass returns about 0 dB; one that
+%   anti-aliases returns tens of dB below.  No files are touched.
+fs = 16000;
+r = 235 / 150;
+t = (0:round(2 * fs) - 1).' / fs;
+tone = 0.5 * sin(2 * pi * 6000 * t);     % 6000 > fs/2/r = 5105, so it must vanish
+y = vc_resample(tone, r, round(numel(tone) / r));
+dB = 20 * log10(max(sqrt(mean(y .^ 2)), 1e-12) / sqrt(mean(tone .^ 2)));
 end
 
 % ======================================================================

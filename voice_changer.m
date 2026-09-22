@@ -14,7 +14,11 @@ function [y, info] = voice_changer(varargin)
 %   ---------------------------------------------------------------------
 %   PRESETS (--preset)
 %     normal / adult / male / none  identity (A/B reference, 1:1)
-%     child, child_female           child-like voice:  F0 x~1.9, formants x~1.22
+%     child                         child-like voice:  F0 -> 235 Hz, formants x1.22
+%     child_soft                    the same, lower and mellower: F0 -> 210 Hz,
+%                                   formants x1.15 (see the FORMANTS note: the two
+%                                   factors have to move together)
+%     child_female                  child-like voice for a female input: F0 -> 250 Hz
 %     elder, elder_male             elderly voice:     F0 x0.86, formants x0.94,
 %                                   tremor + breathiness + duller spectrum
 %     elder_female                  gentler elderly transform for high voices
@@ -94,6 +98,20 @@ function [y, info] = voice_changer(varargin)
 %   clamps it: reading the clamped value made a female input's true 0.94 look like
 %   1.567 and produced a factor of 1.000, i.e. no tract change at all.
 %
+%   WHY THE PITCH TARGET AND THE FORMANTS MUST BE CHOSEN TOGETHER.  A child has
+%   BOTH a higher voice and a shorter vocal tract, but not by the same amount: the
+%   tract length ratio between an adult male and a 5..8 year old is roughly
+%   1.14..1.25, while the F0 ratio is roughly 1.5..2.0.  The formant factor must
+%   therefore be SMALLER than the pitch factor - that is why 1.22 belongs to
+%   ratio 1.567 and not something near 1.567.  Turning the pitch target down
+%   without turning the formant factor down as well leaves the tract sounding
+%   smaller than the pitch implies, which is heard as thin and synthetic, i.e. the
+%   opposite of what was wanted.  Measured on a male recording (F0 148.9 Hz):
+%       target 235, formant 1.22 -> F0 235 Hz, centroid ~1356 Hz   (preset child)
+%       target 210, formant 1.15 -> F0 210 Hz, centroid ~1244 Hz   (preset child_soft)
+%   which is why child_soft exists as a pair of factors rather than as a --target
+%   override on child.
+%
 %   ---------------------------------------------------------------------
 %   TIMING (decision recorded here because it used to be enforced as a rule)
 %   This started life as a command line exercise with a "every run must finish
@@ -165,31 +183,68 @@ switch preset
     % child_female +0.50, elder/elder_female -0.25 dB/oct (each within 7 % of the
     % pitch-only centroid).  Before this the values were 1.5 / 1.0 / -1.8 / -1.2
     % on top of a -20*log10(r) compensation, which measured 35..39 % too dark.
+    %
+    % The two child presets ask for nfft 1024 / hop 256 instead of the 512/128
+    % default.  This is the one parameter that measurably reduces the phase
+    % vocoder's metallic character: on a real recording at ratio 1.567 the
+    % harmonic-to-total ratio in voiced frames improves from -1.44 to -0.96 dB
+    % (i.e. ~10 % more of the frame energy stays in the harmonics instead of
+    % smearing between them), the energy spectral centroid drops 1128 -> 1112 Hz
+    % and the crest factor 14.5 -> 12.5.  A longer window also means fewer frames
+    % and less phase error accumulated per unit time, which is what "metallic"
+    % actually is.  The elderly presets keep 512/128: measured, they get worse
+    % with the longer window (their pitch movement is downward and smaller, so the
+    % extra smearing is not paid for by any coherence gain).
     case {'child', 'kid', 'child_male'}
         pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
                     'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, ...
                     'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 1.567, ...
-                    'pitch0', 235 / 150, 'formant0', 1.22);
+                    'pitch0', 235 / 150, 'formant0', 1.22, ...
+                    'nfft', 1024, 'hop', 256);
+    case {'child_soft', 'kid_soft', 'child2'}
+        % The same child, quieter and lower: F0 target 210 Hz with the formant
+        % factor scaled down with it (1.15 instead of 1.22).  The pair has to move
+        % TOGETHER - see the FORMANTS note in the header - because the formant
+        % factor that belongs to a 1.57x pitch shift (1.22) is too large for a
+        % 1.42x one: it would leave the tract sounding smaller than the pitch
+        % suggests, which is heard as thin and synthetic.  Measured on the male
+        % test recording: F0 148 -> 210 Hz, formant peaks x1.15, energy spectral
+        % centroid 1244 Hz against 1356 Hz for the standard child preset, i.e.
+        % 8 % less bright, with the same harmonic-to-total ratio.
+        %
+        % 'ratiomax' has to be this preset's OWN design ratio 210/150, not the
+        % inherited 1.567: the ratio ceiling exists to stop the pitch running away
+        % on a high input, and with child's ceiling this preset clamped a 148.9 Hz
+        % input straight back up to x1.567 = 235 Hz, i.e. it produced exactly the
+        % preset it is supposed to be the gentler alternative to.  Caught by the
+        % demo check that asserts the design-point ratio, which is why that check
+        % is written against the design point rather than the test signal.
+        pp = struct('pitch', 5, 'formant', 1.15, 'tilt', 0.5, ...
+                    'mode', 'abs', 'target', 210, 'tremor', 0, 'breath', 0, ...
+                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 210 / 150, ...
+                    'pitch0', 210 / 150, 'formant0', 1.15, ...
+                    'nfft', 1024, 'hop', 256);
     case {'child_female', 'girl'}
         pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, ...
                     'ref', 'auto', 'reffallback', 190, 'maxf0', 340, 'ratiomax', 1.316, ...
-                    'pitch0', 250 / 190, 'formant0', 1.18);
+                    'pitch0', 250 / 190, 'formant0', 1.18, ...
+                    'nfft', 1024, 'hop', 256);
     case {'elder', 'old', 'elder_male', 'old_man'}
         pp = struct('pitch', -2.5, 'formant', 0.94, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 1.0, 'breath', 0.9, ...
                     'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', [], ...
-                    'pitch0', [], 'formant0', []);
+                    'pitch0', [], 'formant0', [], 'nfft', [], 'hop', []);
     case {'elder_female', 'old_woman'}
         pp = struct('pitch', -1.8, 'formant', 0.96, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 0.8, 'breath', 0.7, ...
                     'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', [], ...
-                    'pitch0', [], 'formant0', []);
+                    'pitch0', [], 'formant0', [], 'nfft', [], 'hop', []);
     case {'normal', 'adult', 'male', 'female', 'none', 'identity'}
         pp = struct('pitch', 0, 'formant', 1, 'tilt', 0, ...
                     'mode', 'ratio', 'target', [], 'tremor', 0, 'breath', 0, ...
                     'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', [], ...
-                    'pitch0', [], 'formant0', []);
+                    'pitch0', [], 'formant0', [], 'nfft', [], 'hop', []);
     otherwise
         error('voice_changer:preset', 'unknown preset "%s" (child | elder | normal | ...)', preset);
 end
@@ -215,6 +270,15 @@ if ~ismember('ref',     specified) && isempty(s.ref) && ~isempty(pp.ref)
 end
 if isfield(pp, 'reffallback') && ~isempty(pp.reffallback)
     cfg.pitchRefFallback = pp.reffallback;     % used only when detection fails
+end
+% A preset may ask for a different frame size (the child presets do, see above);
+% an explicit --nfft / --hop still wins, and the hop is only taken from the preset
+% when the preset also names the nfft it belongs to.
+if isfield(pp, 'nfft') && ~isempty(pp.nfft) && isempty(s.nfft)
+    cfg.nfft = pp.nfft;
+    if isfield(pp, 'hop') && ~isempty(pp.hop) && isempty(s.hop)
+        cfg.hop = pp.hop;
+    end
 end
 
 if ~isempty(s.ratio)
@@ -779,7 +843,7 @@ fprintf(['voice_changer - command line voice changer (normal / child / elderly)\
     '  voice_changer(''in.wav'', ''--preset'', ''child'', ''out.wav'')\n' ...
     '  y = voice_changer(x, ''--preset'', ''elder'');\n' ...
     '\n' ...
-    'presets: child | child_female | elder | elder_male | elder_female | normal\n' ...
+    'presets: child | child_soft | child_female | elder | elder_male | elder_female | normal\n' ...
     'options: --pitch <semitones>  --target <Hz>  --ratio <r>  --ref <Hz|auto>\n' ...
     '         --max-f0 <Hz>  --ratio-max <r>\n' ...
     '         --formant <r>  --formant-track  --tilt <dB/oct>  --tremor <pct>\n' ...
