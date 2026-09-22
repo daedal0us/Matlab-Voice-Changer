@@ -576,6 +576,24 @@ if d_aa > -10
     ok = false;
 end
 
+% ---- level rule: the output must match the INPUT loudness --------------
+% The project's stated goal is a voice changer, not a level changer: an A/B
+% comparison where one side is quieter reads as "worse" whatever the conversion
+% did.  So the default rule is "output RMS == input RMS", and this asserts it -
+% the check exists because the rule used to be "normalise to a fixed -18 dBFS",
+% which made the output level depend on the setting instead of the input, and
+% the peak limiter then cut a further 4.4 dB off the result on this very signal.
+[y_lv, info_lv] = voice_changer(x, '--preset', 'child', '--quiet');
+r_in  = sqrt(mean(x .^ 2));
+r_out = sqrt(mean(y_lv .^ 2));
+ratio = r_out / r_in;
+fprintf('\nlevel rule       : input RMS %.4f -> output RMS %.4f (x%.3f = %+.2f dB)\n', ...
+        r_in, r_out, ratio, 20 * log10(ratio));
+if abs(20 * log10(ratio)) > 0.5
+    fprintf('    ! the output level does not follow the input (limit %.1f dB)\n', 0.5);
+    ok = false;
+end
+
 % ---- A/B identity check: normal preset must be transparent ------------
 % Level normalisation is switched off (and no file is involved), so this
 % measures the algorithm itself: with every conversion factor at 1 the pipeline

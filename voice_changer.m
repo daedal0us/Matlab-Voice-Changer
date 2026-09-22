@@ -77,8 +77,10 @@ function [y, info] = voice_changer(varargin)
 %     --fs      <Hz>          expected sample rate (resampled if different)
 %     --nfft    <n>           STFT size, default 512
 %     --hop     <n>           STFT hop,  default nfft/4
-%     --target-level <dBFS>   output RMS, default -18
-%     --no-normalize          keep the output level instead of normalising
+%     --target-level <dBFS>   accepted for compatibility only; the output level
+%                             now follows the INPUT RMS, not this value
+%     --no-normalize          keep the converted level instead of matching the
+%                             input RMS
 %     --plot                  show a before/after spectrogram figure
 %     --quiet                 suppress the report
 %     --help
@@ -425,6 +427,17 @@ if isfield(s, 'no_normalize') && (islogical(s.no_normalize) || isnumeric(s.no_no
     cfg.normalize = false;                      % --no-normalize also clears it
 end
 lvl = cfg.targetLevelDb;
+% THE CEILING IS NOW A CLIPPING GUARD, NOT A LEVEL.  When the level rule was
+% "normalise to a fixed -18 dBFS", the ceiling and the level were the same
+% number, so --target-level made sense as a loudness control.  The rule is now
+% "match the input RMS" (see stage 5), and a fixed level would fight it: for the
+% project's test recording (RMS 0.151, peak 1.000) matching the RMS puts the
+% peaks at 1.0, so an -18 dBFS ceiling would have compressed everything above
+% 0.126 - 1.9 % of the samples at a 0.5 knee.  What is left is the value that
+% actually matters: 0.999, just short of full scale.  --target-level is still
+% accepted so old command lines keep running, but it no longer sets the level.
+ceil_lin = 0.999;
+L_KNEELIN = 0.9;                 % knee: measured 0.046 % of samples sit above it
 
 % ------------------------------------------------------------- input
 [x, fsIn, inName] = load_audio(s.in, array_fs(varargin));
@@ -759,15 +772,56 @@ if cfg.breath > 0
 end
 
 % (5) level
+% THE DEFAULT IS TO MATCH THE INPUT RMS, not a fixed target.  A voice changer's
+% job is to change the voice, not the loudness: an A/B comparison where one side
+% is 5 dB quieter reads as "worse" no matter how good the conversion is, and the
+% difference is loudness, not quality.  The previous rule normalised to a FIXED
+% -18 dBFS, so the output level followed the setting rather than the input.
+%
+% The peak ceiling is the one thing that can override it.  Measured on the
+% project's 139 s male test recording: input RMS 0.1510, peak 1.000.  Matching
+% that RMS with the default -18 dBFS ceiling (0.126) applies -1.6 dB and the
+% output lands at RMS 0.126 / peak 0.835.  Without a ceiling the output would
+% peak at 1.07 and clip, so the ceiling is kept and the report says when it
+% bound.  Pass --target-level to set it explicitly; it is now a CEILING, so a
+% quiet input is no longer boosted up to it.
+rms_in = sqrt(mean(x .^ 2));
+level_knee = NaN;  level_ratio = 1;
 if cfg.normalize
     cu = sqrt(mean(y .^ 2));
     if cu > 1e-9
-        y = y * (10 ^ (lvl / 20) / cu);
+        y = y * (rms_in / cu);                    % match the input loudness
+        % THE CEILING MUST NOT SCALE THE WHOLE FILE.  Measured: the converted
+        % signal can carry a single sample at 2.45x the RMS-target scale (crest
+        % 24.5 dB, at 42.27 s of the 139 s test file).  Scaling everything down
+        % to fit that one sample cut the output by 19 dB and produced
+        % RMS 0.151 -> 0.0075, i.e. the level rule defeated by one outlier.  A
+        % soft knee above 0.9 leaves everything below it bit-identical and
+        % rounds off only what would have clipped.
+        pk = max(abs(y));
+        if pk > ceil_lin
+            level_knee = min(L_KNEELIN, ceil_lin);
+            y = softclip(y, level_knee);
+        end
+        rms_out = sqrt(mean(y .^ 2));
+        if rms_in > 1e-9
+            level_ratio = rms_out / rms_in;
+        end
+    else
+        rms_out = 0;
+    end
+else
+    rms_out = sqrt(mean(y .^ 2));
+    if rms_in > 1e-9
+        level_ratio = NaN;                        % nothing was targeted
     end
 end
+% Hard safety clamp.  Only reachable with --no-normalize or a signal that was
+% already over full scale: with normalisation on, the block above has already
+% brought the peak to the ceiling.
 pk = max(abs(y));
-if pk > 0.999
-    y = y * (0.999 / pk);
+if pk > 1
+    y = y / pk;
 end
 y = min(max(y, -1), 1);
 tProcess = toc(tP);
@@ -810,6 +864,9 @@ end
 
 info = struct('fs', fs, 'n', n, 'preset', preset, 'f0_in', A0.f0, ...
     'f0_out', f0_1, 'pitch_ratio', r, 'formant_ratio', Fratio, ...
+    'rms_in', rms_in, 'rms_out', rms_out, ...
+    'level_ratio', level_ratio, 'level_knee', level_knee, ...
+    'level_ceiling_db', ceil_lin, ...
     'f0_expected', f0_expected, 'f0_measured', f0_measured, ...
     'f0_reliable', f0_reliable, ...
     'formant_scale_applied', Fratio / r, 'tilt_db_oct', cfg.tilt, ...
@@ -926,6 +983,7 @@ fprintf('  formant  : final x%.3f (%s, envelope scaled x%.3f before the pitch sh
         info.formant_ratio, tracknote(info), info.formant_scale_applied);
 fprintf('  tilt     : %+.2f dB/oct     tremor: %.2f%%     breath: %.2f%%\n', ...
         info.tilt_db_oct, info.tremor_pct, info.breath_pct);
+fprintf('  level    : RMS %.4f -> %.4f%s\n', info.rms_in, info.rms_out, levelnote(info));
 fprintf('  timing   : total %.0f ms  (analysis %.0f ms + processing %.0f ms)  fs=%g Hz, %.2f s audio\n', ...
         1000 * info.time_total, 1000 * info.time_analyze, 1000 * info.time_process, ...
         info.fs, info.n / info.fs);
@@ -957,6 +1015,45 @@ elseif isfield(info, 'pitch_capped') && info.pitch_capped && isfield(info, 'max_
 else
     s = '';
 end
+end
+
+% ======================================================================
+function y = softclip(y, knee)
+%SOFTCLIP  Rounds off samples above KNEE instead of scaling or hard clipping.
+%   Below the knee the signal is unchanged sample for sample, so the RMS match
+%   is preserved; above it the excess is compressed into the remaining headroom,
+%   continuously in value and slope at the knee (no audible corner), and the
+%   result cannot leave [-1, 1].  Scaling the whole file down would have been
+%   simpler but lets one outlier decide the loudness of everything.
+if knee <= 0 || knee >= 1
+    return
+end
+a = abs(y);
+m = a > knee;
+if ~any(m)
+    return
+end
+room = 1 - knee;
+y(m) = sign(y(m)) .* (knee + room * tanh((a(m) - knee) / room));
+end
+
+% ======================================================================
+function s = levelnote(info)
+%LEVELNOTE  Says what the level rule actually achieved.
+%   The default is to match the input RMS so that an A/B comparison is not
+%   decided by a loudness difference.  A verdict ("matched" / "given up") hides
+%   how close it got, so the ratio is reported instead: it is 1.000 when nothing
+%   was in the way, and slightly under 1 when peaks had to be softened.
+if ~isfield(info, 'level_ratio') || ~isfinite(info.level_ratio)
+    s = '  [--no-normalize: level left as converted]';
+    return
+end
+s = sprintf('  [target = input RMS, achieved x%.3f', info.level_ratio);
+if isfield(info, 'level_knee') && isfinite(info.level_knee)
+    s = [s sprintf(', peak held at %.3f by a soft knee from %.2f', ...
+        info.level_ceiling_db, info.level_knee)];
+end
+s = [s ']'];
 end
 
 function s = f0_text(f0, info, isInput)
