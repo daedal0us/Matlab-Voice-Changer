@@ -31,7 +31,12 @@ function [y, info] = voice_changer(varargin)
 %                             pushed proportionally higher and thin out.  The
 %                             ceiling only ever lowers the ratio.  Use 0 to
 %                             disable it.
-%     --formant <r>           final formant factor (default = pitch ratio)
+%     --formant <r>           final formant factor.  Default: the child presets
+%                             scale their design factor with the pitch factor
+%                             (see FORMANTS below), everything else uses the
+%                             pitch ratio.
+%     --no-formant-track      keep the preset's fixed formant factor instead of
+%                             scaling it with the pitch factor
 %     --tilt    <dB/oct>      spectral tilt about 1 kHz (brightness)
 %     --tremor  <pct>         tremor depth in percent of F0 (elderly)
 %     --rate    <Hz>          tremor rate (default 5)
@@ -61,6 +66,29 @@ function [y, info] = voice_changer(varargin)
 %     filtering vc_mask           envelope warp + tilt + rumble, one FFT pass
 %
 %   ---------------------------------------------------------------------
+%   ---------------------------------------------------------------------
+%   FORMANTS (the child presets scale the vocal tract with the pitch)
+%   A single fixed formant factor cannot be right for every input once the pitch
+%   factor adapts to the speaker.  The child preset's 1.22 was chosen for its
+%   design point (a 150 Hz input, ratio 235/150 = 1.567), where it produces the
+%   roughly 20 % shorter vocal tract that makes a male voice sound child-like.
+%   With an automatic reference the ratio varies, so the factor scales with it:
+%
+%       formant = formant0 * (pitchRatio / r0),  clamped to [1.00, 1.30]
+%
+%   and only for pitchRatio >= r0.  Measured:
+%       110 Hz in -> ratio 1.567 -> formant 1.300  (clamped; F1 700 -> 910 Hz)
+%       150 Hz in -> ratio 1.567 -> formant 1.220  (the design point, unchanged)
+%       250 Hz in -> ratio 0.940 -> formant 1.220  (held, not scaled down)
+%   The factor is deliberately NOT scaled below the design point: a female voice's
+%   formants are already high, and shrinking them would move away from a child
+%   rather than towards one.  --no-formant-track restores the fixed value and an
+%   explicit --formant always wins.
+%   It reads the RAW pitch ratio, before the ratio ceiling clamps it: reading the
+%   clamped value made a female input's true 0.94 look like 1.567 and produced a
+%   factor of 1.000, i.e. no tract change at all.
+%
+%   ---------------------------------------------------------------------
 %   TIMING (decision recorded here because it used to be enforced as a rule)
 %   This started life as a command line exercise with a "every run must finish
 %   in under 1 s" requirement, and the code used to warn when a run went over.
@@ -88,7 +116,7 @@ t_all = tic;
 defspec = struct( ...
     'in', [], 'out', '', 'outfile', '', 'preset', 'child', 'pitch', [], ...
     'target', [], 'ratio', [], 'ref', [], 'ref_auto', false, 'max_f0', [], ...
-    'ratio_max', [], ...
+    'ratio_max', [], 'no_formant_track', false, ...
     'formant', [], 'tilt', [], ...
     'formant_map', [], 'env_lifter', [], ...
     'tremor', [], 'rate', [], 'breath', [], 'fs', [], 'nfft', [], 'hop', [], ...
@@ -96,12 +124,14 @@ defspec = struct( ...
 
 cfg = struct('fs', 16000, 'nfft', 512, 'hop', 128, 'pitch', 6, ...
     'pitchMode', 'rel', 'pitchRef', 150, 'pitchRefFallback', 150, ...
+    'formantTrack', false, 'formantMin', 1.00, 'formantMax', 1.30, 'formantDamp', 1, ...
     'pitchRatio', [], 'maxF0', [], ...
     'pitchCapped', false, 'formant', [], ...
     'tilt', 0, 'tremor', 0, 'tremorRate', 5, 'wobble', 0.6, 'wobbleRate', 0.7, ...
     'breath', 0, 'targetLevelDb', -18, 'normalize', true, 'seed', 20240);
 
 [s, cfg, args] = vc_args(defspec, cfg, varargin);
+
 
 if args.help
     print_help();
@@ -132,23 +162,28 @@ switch preset
     case {'child', 'kid', 'child_male'}
         pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
                     'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, ...
-                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 1.567);
+                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 1.567, ...
+                    'pitch0', 235 / 150, 'formant0', 1.22);
     case {'child_female', 'girl'}
         pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, ...
-                    'ref', 'auto', 'reffallback', 190, 'maxf0', 340, 'ratiomax', 1.316);
+                    'ref', 'auto', 'reffallback', 190, 'maxf0', 340, 'ratiomax', 1.316, ...
+                    'pitch0', 250 / 190, 'formant0', 1.18);
     case {'elder', 'old', 'elder_male', 'old_man'}
         pp = struct('pitch', -2.5, 'formant', 0.94, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 1.0, 'breath', 0.9, ...
-                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', []);
+                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', [], ...
+                    'pitch0', [], 'formant0', []);
     case {'elder_female', 'old_woman'}
         pp = struct('pitch', -1.8, 'formant', 0.96, 'tilt', -0.25, ...
                     'mode', 'ratio', 'target', [], 'tremor', 0.8, 'breath', 0.7, ...
-                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', []);
+                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', [], ...
+                    'pitch0', [], 'formant0', []);
     case {'normal', 'adult', 'male', 'female', 'none', 'identity'}
         pp = struct('pitch', 0, 'formant', 1, 'tilt', 0, ...
                     'mode', 'ratio', 'target', [], 'tremor', 0, 'breath', 0, ...
-                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', []);
+                    'ref', [], 'reffallback', [], 'maxf0', [], 'ratiomax', [], ...
+                    'pitch0', [], 'formant0', []);
     otherwise
         error('voice_changer:preset', 'unknown preset "%s" (child | elder | normal | ...)', preset);
 end
@@ -159,7 +194,13 @@ getnum = @(v) str2double(char(string(v)));
 % preset bundle first, then the explicit options, then the pitch anchor.
 % Precedence of the pitch anchor: --ratio > --target > --pitch > preset.
 if ismember('pitch', specified) || ~isempty(s.pitch), cfg.pitch = getnum(s.pitch);   end
-if ~ismember('formant', specified) && isempty(s.formant), cfg.formant = pp.formant;  end
+% Presets that carry a design formant factor (formant0) are handled by the
+% tracking block further down, which also owns restoring the fixed value when
+% tracking is switched off - so they must not be assigned here.
+if ~ismember('formant', specified) && isempty(s.formant) && ...
+        (~isfield(pp, 'formant0') || isempty(pp.formant0))
+    cfg.formant = pp.formant;
+end
 if ~ismember('tilt',    specified) && isempty(s.tilt),    cfg.tilt    = pp.tilt;     end
 if ~ismember('tremor',  specified) && isempty(s.tremor),  cfg.tremor  = pp.tremor;   end
 if ~ismember('breath',  specified) && isempty(s.breath),  cfg.breath  = pp.breath;   end
@@ -337,6 +378,7 @@ elseif ~explicitPitch && isfield(pp, 'ratiomax') && ~isempty(pp.ratiomax)
     cfg.ratioMax = pp.ratiomax;
 end
 cfg.ratioCapped = false;
+cfg.pitchRawRatio = cfg.pitchRatio;            % before the ratio ceiling
 if ~isempty(cfg.ratioMax) && isfinite(cfg.ratioMax) && cfg.ratioMax > 0 && ...
         cfg.pitchRatio > cfg.ratioMax
     cfg.pitchRatio = cfg.ratioMax;
@@ -345,6 +387,55 @@ end
 
 cfg.pitchRatio = max(0.4, min(2.2, cfg.pitchRatio));
 r = cfg.pitchRatio;
+
+% Formant factor scales WITH the pitch factor (--formant-track, on for the child
+% presets).  A single fixed formant factor cannot be right for every input once
+% the pitch factor adapts to the speaker: the preset's 1.22 was chosen for its
+% design point (a 150 Hz input, ratio 1.567), where it gives the ~20 % shorter
+% vocal tract that makes a male voice sound child-like.  With an automatic
+% reference the ratio varies, and a female input needs 235/250 = 0.94 - at which
+% point a fixed 1.22 would enlarge the vocal tract by 22 % while the pitch barely
+% moves, which is the opposite of a child.  Scaling keeps the two consistent:
+%
+%     formant = formant0 * (r / r0)^damping        clamped to [min, max]
+%
+% damping 1 means the vocal tract follows the pitch exactly; 0 reproduces the old
+% fixed behaviour.  The clamp keeps the result inside the range a real child's
+% vocal tract can produce (roughly 15..35 % shorter than an adult's).
+% It uses the RAW pitch ratio (before the ratio ceiling clamps it) and only scales
+% inside the region the preset was designed for, r >= r0.  Using the clamped ratio
+% was wrong: with auto plus a ceiling a female input's true 0.94 became 1.567, so
+% the factor came out 1.000 - i.e. no tract change at all.  Below the design point
+% (r < r0) the factor stays at formant0 rather than scaling down further, because
+% a female voice's formants are already high; scaling them down to 1.22*0.94 = 1.15
+% would put F1 near 1000*1.15, past what a child's tract produces.
+trackWanted = true;
+if isfield(s, 'no_formant_track') && ~isempty(s.no_formant_track)
+    v = s.no_formant_track;
+    if ischar(v) || isstring(v)
+        trackWanted = ~any(strcmpi(char(string(v)), {'on', 'true', '1', 'yes'}));
+    elseif islogical(v) || isnumeric(v)
+        trackWanted = ~logical(v);
+    end
+end
+formantArgGiven = ismember('formant', specified) || ~isempty(s.formant);
+
+cfg.formantTrack = false;
+cfg.formantMin   = 1.00;
+cfg.formantMax   = 1.30;
+cfg.formantDamp  = 1;
+if formantArgGiven
+    % an explicit --formant always wins, tracking or not
+    cfg.formant = getnum(s.formant);
+elseif isfield(pp, 'formant0') && ~isempty(pp.formant0)
+    if trackWanted && abs(pp.pitch0) > 0 && cfg.pitchRawRatio >= abs(pp.pitch0)
+        ftr = pp.formant0 * (cfg.pitchRawRatio / abs(pp.pitch0)) ^ cfg.formantDamp;
+        cfg.formant = max(cfg.formantMin, min(cfg.formantMax, ftr));
+        cfg.formantTrack = true;
+    else
+        cfg.formant = pp.formant0;
+    end
+end
 
 if isempty(cfg.formant)
     cfg.formant = r;
@@ -455,6 +546,7 @@ info = struct('fs', fs, 'n', n, 'preset', preset, 'f0_in', A0.f0, ...
     'target_f0', NaN, 'pitch_ref', cfg.pitchRef, 'outfile', outName, ...
     'max_f0', cfg.maxF0, 'pitch_capped', cfg.pitchCapped, ...
     'ratio_max', cfg.ratioMax, 'ratio_capped', cfg.ratioCapped, ...
+    'formant_tracked', cfg.formantTrack, ...
     'time_analyze', tAnalyze, 'time_process', tProcess, 'time_total', toc(t_all));
 if strcmp(cfg.pitchMode, 'abs')
     info.target_f0 = cfg.pitchTarget;
