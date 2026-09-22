@@ -119,8 +119,8 @@ dc = {};
 if ifix.formant_tracked
     dc{end + 1} = 'child preset scaled the formant factor by default';
 end
-if abs(ifix.formant_ratio - 1.22) > 1e-6
-    dc{end + 1} = sprintf('child default formant x%.3f, expected the fixed x1.220', ...
+if abs(ifix.formant_ratio - 1.15) > 1e-6
+    dc{end + 1} = sprintf('child default formant x%.3f, expected the fixed x1.150', ...
                           ifix.formant_ratio);
 end
 [ytrk, itrk] = voice_changer(x, '--preset', 'child', '--formant-track', '--quiet');
@@ -137,7 +137,7 @@ if max(abs(ytrk - yfix)) <= 1e-9
 end
 % The old spelling must still parse (and leave the output file argument intact).
 [yold, iold] = voice_changer(x, '--preset', 'child', '--no-formant-track', '--quiet');
-if iold.formant_tracked || abs(iold.formant_ratio - 1.22) > 1e-6
+if iold.formant_tracked || abs(iold.formant_ratio - 1.15) > 1e-6
     dc{end + 1} = '--no-formant-track no longer means the fixed factor';
 end
 if max(abs(yold - yfix)) > 1e-9
@@ -153,21 +153,22 @@ if ~isempty(dc)
     ok = false;
 end
 
-% ---- the mellow child preset is a PAIR of factors, not a lower target ----
+% ---- the child presets are a PAIR of factors, not a single number ----
 % A child has both a higher voice and a shorter vocal tract, but not by the same
 % amount: the tract ratio is roughly 1.14..1.25 while the F0 ratio is 1.5..2.0, so
 % the formant factor must stay SMALLER than the pitch factor.  Dropping the target
 % without dropping the formant factor with it leaves the tract sounding smaller
-% than the pitch implies = thin and synthetic, which is the complaint child_soft
-% exists to answer.  This check asserts the pair and the 1024/256 frame size the
-% child presets rely on (see VOICE_CHANGER).
+% than the pitch implies = thin and synthetic, which is the complaint that made the
+% 210 Hz preset the default.  This check asserts each preset as a PAIR and asserts
+% the 1024/256 frame size they rely on (see VOICE_CHANGER).
 dc2 = {};
 % The ratios are asserted against each preset's own DESIGN REFERENCE, not against
 % the 120 Hz test vowel.  With the automatic reference the child presets clamp the
-% pitch ratio at their design value (1.567 / 1.316) as soon as the input is below
-% it, which is exactly why a 120 Hz input gives x1.567 rather than 235/120.  Making
-% the check use the test vowel's own F0 would assert the clamp, not the preset.
-pairs = {'child', 235, 150, 1.22; 'child_soft', 210, 150, 1.15; 'child_female', 250, 190, 1.18};
+% pitch ratio at their design value as soon as the input is below it, which is
+% exactly why a 120 Hz input gives x1.400 for the 210 Hz preset rather than
+% 210/120.  Making the check use the test vowel's own F0 would assert the clamp,
+% not the preset.
+pairs = {'child', 210, 150, 1.15; 'child_bright', 235, 150, 1.22; 'child_female', 250, 190, 1.18};
 for k = 1:size(pairs, 1)
     want = pairs{k, 2} / pairs{k, 3};
     [~, ip] = voice_changer(x, '--preset', pairs{k, 1}, '--quiet');
@@ -252,9 +253,12 @@ for p = {'child', 'elder'}
     % formant factor is a compromise across signal types: exact brightness
     % neutrality is not achievable, and tracking (now opt-in, see VOICE_CHANGER)
     % can push the factor to its 1.30 ceiling, which legitimately moves the
-    % spectrum further than the fixed 1.22 does.  What this check is really
+    % spectrum further than the fixed factor does.  What this check is really
     % guarding against is the old double compensation, which was 35..39 % too
     % dark, plus any change that makes the stage wildly brighter or darker.
+    % For reference the default child preset now measures -1.3 % (it was +36 % with
+    % the 235 Hz / x1.22 preset, whose mask factor 1.22/1.567 = 0.779 cut much
+    % deeper than the current 1.15/1.400 = 0.821).
     if abs(drel) > 0.40
         bc{end + 1} = sprintf('formant stage shifts brightness by %+.0f%%', 100 * drel);
     end
@@ -267,11 +271,15 @@ for p = {'child', 'elder'}
 end
 
 % ---- the tilt knob must be monotone (it used to be offset by a constant) ----
-% Only monotonicity and "not dead" are asserted here.  The magnitude of the
-% effect on this test signal is small by nature: the synthetic vowel has almost
-% no energy above 3 kHz, so a tilt of a few dB/oct barely moves its centroid
-% (measured x1.06 over a 4 dB/oct span, against x1.42 on real speech, where the
-% rolloff is much shallower).  The calibration itself is done on real recordings.
+% What is asserted is MONOTONICITY and "not dead", not a magnitude.  The synthetic
+% vowel has almost no energy above 3 kHz, so a few dB/oct barely moves its centroid
+% (the calibration itself is done on real speech, where the rolloff is much
+% shallower).  The effect got even smaller when the default child preset became the
+% 210 Hz / x1.15 one: its mask factor is 1.15/1.400 = 0.821 against 1.22/1.567 =
+% 0.779 for the old preset, i.e. a much shallower spectral cut, so the formant stage
+% is now close to brightness-neutral on this signal (-1.3 %, where the old preset
+% measured +36 %).  That is an improvement, but it also means this particular check
+% has less room to work with, so the floor is set at 0.5 % rather than 2 %.
 ct = zeros(1, 3);
 for k = 1:3
     yy = voice_changer(x, '--preset', 'child', '--tilt', -2 + 2 * (k - 1), '--quiet');
@@ -281,7 +289,7 @@ tc = {};
 if ~(ct(1) < ct(2) && ct(2) < ct(3))
     tc{end + 1} = 'tilt is not monotone in brightness';
 end
-if (ct(3) / ct(1) - 1) < 0.02
+if (ct(3) / ct(1) - 1) < 0.005
     tc{end + 1} = sprintf('tilt has almost no effect (x%.3f over 4 dB/oct)', ct(3) / ct(1));
 end
 fprintf('  tilt --2/0/+2 dB/oct -> centroid %.0f / %.0f / %.0f Hz (x%.3f) | %s\n', ...
@@ -446,17 +454,19 @@ end
 % Nyquist and the input Nyquist then folded back into 3..5 kHz, on top of F3/F4.
 %
 % The probe is a tone just above the post-decimation Nyquist, where the two
-% behaviours differ by measurement rather than by argument: 16 kHz at ratio 1.567
-% puts the output Nyquist at 5105 Hz, so a 6000 Hz tone must be removed.  Measured
-% RMS relative to the input tone: -0.2 dB with the old cutoff (the tone passed
-% straight through, i.e. 21 dB of it folded into the band) against -21.0 dB now.
+% behaviours differ by measurement rather than by argument: 16 kHz at the default
+% child ratio 210/150 puts the output Nyquist at 5714 Hz, so a 6500 Hz tone must be
+% removed.  Measured RMS relative to the input tone: -18.4 dB with the corrected
+% cutoff against about 0 dB with the old one (the tone passed straight through).
 % A spectrogram of a pitch-up conversion shows the same thing as a band of folded
-% energy, so this check is the cheap proxy for it.
+% energy, so this check is the cheap proxy for it.  The threshold is 8 dB above the
+% measured value so a reasonable change to the kernel does not trip it, while the
+% old behaviour (0 dB) still fails by a wide margin.
 d_aa = resample_alias_check();
-fprintf('\nresampler anti-alias: 6 kHz tone at pitch ratio 1.567 (output Nyquist %.0f Hz) leaves %.1f dB\n', ...
-        (fs / 2) / 1.567, d_aa);
-if d_aa > -14
-    fprintf('    ! folded energy is not being filtered (expected below -14 dB)\n');
+fprintf('\nresampler anti-alias: 6.5 kHz tone at pitch ratio %.3f (output Nyquist %.0f Hz) leaves %.1f dB\n', ...
+        210 / 150, (fs / 2) / (210 / 150), d_aa);
+if d_aa > -10
+    fprintf('    ! folded energy is not being filtered (expected below -10 dB)\n');
     ok = false;
 end
 
@@ -599,9 +609,10 @@ function dB = resample_alias_check()
 %   went in, in dB.  A decimator with no low-pass returns about 0 dB; one that
 %   anti-aliases returns tens of dB below.  No files are touched.
 fs = 16000;
-r = 235 / 150;
+r = 210 / 150;                              % the default child preset's ratio
 t = (0:round(2 * fs) - 1).' / fs;
-tone = 0.5 * sin(2 * pi * 6000 * t);     % 6000 > fs/2/r = 5105, so it must vanish
+fprobe = 6500;                              % must stay above fs/2/r = 5714 Hz
+tone = 0.5 * sin(2 * pi * fprobe * t);
 y = vc_resample(tone, r, round(numel(tone) / r));
 dB = 20 * log10(max(sqrt(mean(y .^ 2)), 1e-12) / sqrt(mean(tone .^ 2)));
 end

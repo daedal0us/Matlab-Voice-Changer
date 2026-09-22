@@ -1,12 +1,12 @@
 function make_ab()
 %MAKE_AB  Render a listening comparison for the male -> child conversion.
 %   Writes A/B_*.wav at 16 kHz:
-%     A_dry          input, 16 kHz (the reference for A/B)
-%     B_child_now    child as it behaves now (anti-aliased resampler, nfft 1024)
-%     C_child_soft   child_soft preset (F0 target 210, formant 1.15)
-%     D_child_light  child with a smaller formant factor (1.12), same pitch
-%     E_pv_only      pitch stages only: no formant, no tilt, no normalisation
-%     F_child_prev   child as it behaved before the resampler fix
+%     A_dry           input, 16 kHz (the reference for A/B)
+%     B_child         the default child preset (F0 210 Hz, formant x1.15)
+%     C_child_bright  the previous default (F0 235 Hz, formant x1.22)
+%     D_child_light   default child with a smaller formant factor (1.10)
+%     E_pv_only       pitch stages only: no formant, no tilt, no normalisation
+%     F_child_prev    child as it behaved before the resampler fix
 here = fileparts(mfilename('fullpath'));
 cd(here);
 fs = 16000;
@@ -26,10 +26,10 @@ fprintf('input energy above 5100 Hz: %.1f dB below the total\n', ...
         10 * log10(sum(S(ff > 5100) .^ 2) / sum(S(ff > 60) .^ 2)));
 
 R = { ...
-    'AB_01_B_child_now.wav',   @() voice_changer(x, '--preset', 'child', '--quiet'); ...
-    'AB_02_C_child_soft.wav',  @() voice_changer(x, '--preset', 'child_soft', '--quiet'); ...
-    'AB_03_D_child_light.wav', @() voice_changer(x, '--preset', 'child', '--formant', 1.12, '--quiet'); ...
-    'AB_04_E_pv_only.wav',     @() voice_changer(x, '--preset', 'child', '--formant', 1, '--tilt', 0, '--no-normalize', '--quiet')};
+    'AB_01_B_child.wav',        @() voice_changer(x, '--preset', 'child', '--quiet'); ...
+    'AB_02_C_child_bright.wav', @() voice_changer(x, '--preset', 'child_bright', '--quiet'); ...
+    'AB_03_D_child_light.wav',  @() voice_changer(x, '--preset', 'child', '--formant', 1.10, '--quiet'); ...
+    'AB_04_E_pv_only.wav',      @() voice_changer(x, '--preset', 'child', '--formant', 1, '--tilt', 0, '--no-normalize', '--quiet')};
 for k = 1:size(R, 1)
     [y, info] = R{k, 2}();
     audiowrite(R{k, 1}, y / max(abs(y)) * 0.9, fs);

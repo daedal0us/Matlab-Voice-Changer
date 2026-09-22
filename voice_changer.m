@@ -14,10 +14,11 @@ function [y, info] = voice_changer(varargin)
 %   ---------------------------------------------------------------------
 %   PRESETS (--preset)
 %     normal / adult / male / none  identity (A/B reference, 1:1)
-%     child                         child-like voice:  F0 -> 235 Hz, formants x1.22
-%     child_soft                    the same, lower and mellower: F0 -> 210 Hz,
-%                                   formants x1.15 (see the FORMANTS note: the two
-%                                   factors have to move together)
+%     child                         child-like voice:  F0 -> 210 Hz, formants x1.15
+%                                   (the default; child_soft is an alias)
+%     child_bright                  the same idea, more tract change and higher:
+%                                   F0 -> 235 Hz, formants x1.22 (see the FORMANTS
+%                                   note: the two factors have to move together)
 %     child_female                  child-like voice for a female input: F0 -> 250 Hz
 %     elder, elder_male             elderly voice:     F0 x0.86, formants x0.94,
 %                                   tremor + breathiness + duller spectrum
@@ -25,7 +26,7 @@ function [y, info] = voice_changer(varargin)
 %
 %   OPTIONS (all optional, command line wins over the preset)
 %     --pitch   <semitones>   relative pitch shift  (+12 = one octave up)
-%     --target  <Hz>          absolute target F0    (child preset: 235 Hz)
+%     --target  <Hz>          absolute target F0    (child preset: 210 Hz)
 %     --ratio   <r>           pitch factor directly (r = F0_out / F0_in)
 %     --ref     <Hz>          reference F0 used by the child preset (150 Hz)
 %     --max-f0  <Hz>          ceiling on the OUTPUT F0.  The absolute presets
@@ -36,8 +37,8 @@ function [y, info] = voice_changer(varargin)
 %                             ceiling only ever lowers the ratio.  Use 0 to
 %                             disable it.
 %     --formant <r>           final formant factor.  Default: the preset's fixed
-%                             design factor for the child presets (1.22 / 1.18),
-%                             the pitch ratio for everything else.
+%                             design factor for the child presets (1.15 / 1.18 /
+%                             1.22), the pitch ratio for everything else.
 %     --formant-track         opt in to scaling the child preset's design factor
 %                             with the pitch factor (see FORMANTS below).
 %                             Off by default; --no-formant-track is accepted as a
@@ -73,11 +74,12 @@ function [y, info] = voice_changer(varargin)
 %
 %   ---------------------------------------------------------------------
 %   FORMANTS (the child presets use a FIXED design factor by default)
-%   The child presets carry a fixed formant factor - 1.22 and 1.18, the roughly
-%   20 % shorter vocal tract that makes an adult voice sound child-like - and
-%   that fixed value is the DEFAULT.  The design point is a 150 Hz input at
-%   ratio 235/150 = 1.567, but the factor itself does not move with the ratio:
-%   it is a vocal tract shape, so it stays put.
+%   Each child preset carries a fixed formant factor - 1.15 for the default child,
+%   1.18 for child_female, 1.22 for child_bright, i.e. the roughly 15..22 % shorter
+%   vocal tract that makes an adult voice sound child-like - and that fixed value is
+%   the DEFAULT.  The design point is a 150 Hz input (190 Hz for child_female), but
+%   the factor itself does not move with the ratio: it is a vocal tract shape, so it
+%   stays put.
 %
 %   DECISION: an experimental --formant-track mode scaled the factor with the
 %   pitch (formant = formant0 * (ratio / r0), clamped to [1.00, 1.30], applied
@@ -88,9 +90,10 @@ function [y, info] = voice_changer(varargin)
 %   the scaling bought nothing audible.  What it did buy was instability: the
 %   tracking test compares the RAW pitch ratio against the preset's design ratio
 %   r0, and on a 138 s male recording (F0 148.2 Hz, raw ratio 1.5856 vs
-%   r0 = 1.5667, only +1.2 % above it) the per-4 s-window ratios ranged
-%   1.068..1.785 with 2 of 5 windows above the threshold, so the decision flipped
-%   the factor between 1.22 and the 1.30 clamp (F1 854 vs 910 Hz) from run to run.
+%   r0 = 1.5667 for that preset, only +1.2 % above it) the per-4 s-window ratios
+%   ranged 1.068..1.785 with 2 of 5 windows above the threshold, so the decision
+%   flipped the factor between the design value and the 1.30 clamp (F1 854 vs
+%   910 Hz) from run to run.
 %   The fixed factor has no such decision to get wrong.  --formant-track opts
 %   back in, --no-formant-track is accepted as a no-op for old command lines, and
 %   an explicit --formant always wins over both.
@@ -102,15 +105,16 @@ function [y, info] = voice_changer(varargin)
 %   BOTH a higher voice and a shorter vocal tract, but not by the same amount: the
 %   tract length ratio between an adult male and a 5..8 year old is roughly
 %   1.14..1.25, while the F0 ratio is roughly 1.5..2.0.  The formant factor must
-%   therefore be SMALLER than the pitch factor - that is why 1.22 belongs to
-%   ratio 1.567 and not something near 1.567.  Turning the pitch target down
-%   without turning the formant factor down as well leaves the tract sounding
-%   smaller than the pitch implies, which is heard as thin and synthetic, i.e. the
-%   opposite of what was wanted.  Measured on a male recording (F0 148.9 Hz):
-%       target 235, formant 1.22 -> F0 235 Hz, centroid ~1356 Hz   (preset child)
-%       target 210, formant 1.15 -> F0 210 Hz, centroid ~1244 Hz   (preset child_soft)
-%   which is why child_soft exists as a pair of factors rather than as a --target
-%   override on child.
+%   therefore be SMALLER than the pitch factor - that is why 1.22 belongs to ratio
+%   1.567 and 1.15 to 1.400, and never something near the pitch ratio itself.
+%   Turning the pitch target down without turning the formant factor down as well
+%   leaves the tract sounding smaller than the pitch implies, which is heard as thin
+%   and synthetic, i.e. the opposite of what was wanted.  Measured on a male
+%   recording (F0 148.9 Hz):
+%       target 210, formant 1.15 -> F0 210 Hz, centroid ~1244 Hz  (preset child)
+%       target 235, formant 1.22 -> F0 235 Hz, centroid ~1356 Hz  (preset child_bright)
+%   The gentler pair is the DEFAULT, which is why the preset is a pair of factors
+%   rather than a --target override: the two numbers have to move together.
 %
 %   ---------------------------------------------------------------------
 %   TIMING (decision recorded here because it used to be enforced as a rule)
@@ -195,34 +199,37 @@ switch preset
     % actually is.  The elderly presets keep 512/128: measured, they get worse
     % with the longer window (their pitch movement is downward and smaller, so the
     % extra smearing is not paid for by any coherence gain).
-    case {'child', 'kid', 'child_male'}
-        pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
-                    'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, ...
-                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 1.567, ...
-                    'pitch0', 235 / 150, 'formant0', 1.22, ...
-                    'nfft', 1024, 'hop', 256);
-    case {'child_soft', 'kid_soft', 'child2'}
-        % The same child, quieter and lower: F0 target 210 Hz with the formant
-        % factor scaled down with it (1.15 instead of 1.22).  The pair has to move
-        % TOGETHER - see the FORMANTS note in the header - because the formant
-        % factor that belongs to a 1.57x pitch shift (1.22) is too large for a
-        % 1.42x one: it would leave the tract sounding smaller than the pitch
-        % suggests, which is heard as thin and synthetic.  Measured on the male
-        % test recording: F0 148 -> 210 Hz, formant peaks x1.15, energy spectral
-        % centroid 1244 Hz against 1356 Hz for the standard child preset, i.e.
-        % 8 % less bright, with the same harmonic-to-total ratio.
+    case {'child', 'kid', 'child_male', 'child_soft', 'kid_soft', 'child2'}
+        % THE DEFAULT CHILD PRESET (it used to be the 235 Hz one, which is now
+        % 'child_bright').  F0 target 210 Hz with formant factor 1.15.
         %
-        % 'ratiomax' has to be this preset's OWN design ratio 210/150, not the
-        % inherited 1.567: the ratio ceiling exists to stop the pitch running away
-        % on a high input, and with child's ceiling this preset clamped a 148.9 Hz
-        % input straight back up to x1.567 = 235 Hz, i.e. it produced exactly the
-        % preset it is supposed to be the gentler alternative to.  Caught by the
-        % demo check that asserts the design-point ratio, which is why that check
-        % is written against the design point rather than the test signal.
+        % The pair has to move TOGETHER - see the FORMANTS note in the header -
+        % because the formant factor that belongs to a 1.57x pitch shift (1.22) is
+        % too large for a 1.42x one: it would leave the tract sounding smaller than
+        % the pitch suggests, which is heard as thin and synthetic.  Measured on the
+        % male test recording: F0 148 -> 210 Hz, formant peaks x1.15, energy
+        % spectral centroid 1244 Hz against 1356 Hz for the 235 Hz preset, i.e. 8 %
+        % less bright, with the same harmonic-to-total ratio.
+        %
+        % 'ratiomax' is this preset's OWN design ratio 210/150.  It was inherited
+        % as 1.567 while this preset was the alternative, and that clamped a 148.9 Hz
+        % input straight back up to x1.567 = 235 Hz - i.e. it produced exactly the
+        % preset it was supposed to be the gentler alternative to.  Caught by the
+        % demo check that asserts the design-point ratio, which is why that check is
+        % written against the design point rather than against the test signal.
         pp = struct('pitch', 5, 'formant', 1.15, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 210, 'tremor', 0, 'breath', 0, ...
                     'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 210 / 150, ...
                     'pitch0', 210 / 150, 'formant0', 1.15, ...
+                    'nfft', 1024, 'hop', 256);
+    case {'child_bright', 'kid_bright'}
+        % The previous default, kept for A/B and for inputs that want more of a
+        % child-like tract change: F0 target 235 Hz, formant x1.22 (ratio 1.567).
+        % Same nfft/hop reasoning as above.
+        pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
+                    'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, ...
+                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 1.567, ...
+                    'pitch0', 235 / 150, 'formant0', 1.22, ...
                     'nfft', 1024, 'hop', 256);
     case {'child_female', 'girl'}
         pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
@@ -459,7 +466,7 @@ cfg.pitchRatio = max(0.4, min(2.2, cfg.pitchRatio));
 r = cfg.pitchRatio;
 
 % Formant factor.  DEFAULT IS FIXED: the child presets use their design factor
-% (1.22 / 1.18) unchanged, no matter what the automatic reference did to the
+% (1.15 / 1.18 / 1.22) unchanged, no matter what the automatic reference did to the
 % pitch ratio, because that factor is a vocal tract shape and the pitch already
 % carries the perceived age.  --formant-track opts in to scaling it with the
 % pitch factor:
@@ -843,7 +850,7 @@ fprintf(['voice_changer - command line voice changer (normal / child / elderly)\
     '  voice_changer(''in.wav'', ''--preset'', ''child'', ''out.wav'')\n' ...
     '  y = voice_changer(x, ''--preset'', ''elder'');\n' ...
     '\n' ...
-    'presets: child | child_soft | child_female | elder | elder_male | elder_female | normal\n' ...
+    'presets: child | child_bright | child_female | elder | elder_male | elder_female | normal\n' ...
     'options: --pitch <semitones>  --target <Hz>  --ratio <r>  --ref <Hz|auto>\n' ...
     '         --max-f0 <Hz>  --ratio-max <r>\n' ...
     '         --formant <r>  --formant-track  --tilt <dB/oct>  --tremor <pct>\n' ...
