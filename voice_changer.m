@@ -154,7 +154,7 @@ cfg = struct('fs', 16000, 'nfft', 512, 'hop', 128, 'pitch', 6, ...
     'pitchMode', 'rel', 'pitchRef', 150, 'pitchRefFallback', 150, ...
     'formantTrack', false, 'formantMin', 1.00, 'formantMax', 1.30, 'formantDamp', 1, ...
     'pitchRatio', [], 'pitchRawRatio', [], 'maxF0', [], ...
-    'pitchCapped', false, 'formant', [], ...
+    'pitchAsked', [], 'pitchCapped', false, 'formant', [], ...
     'tilt', 0, 'tremor', 0, 'tremorRate', 5, 'wobble', 0.6, 'wobbleRate', 0.7, ...
     'breath', 0, 'targetLevelDb', -18, 'normalize', true, 'seed', 20240);
 
@@ -179,6 +179,46 @@ end
 % the output at maxF0 regardless of the input, so one preset behaves sensibly
 % over the whole input range.  It only ever lowers the ratio, so presets are
 % unaffected on the inputs they were designed for.
+%
+% 'ratiomax' is the RATIO CEILING, and it is NOT the preset's design ratio
+% target/ref.  It used to be written that way (1.400 for child = 210/150) and that
+% is a bug, because the absolute-target mode only requests target/ref when the
+% input happens to sit AT the reference:
+%
+%     requested ratio = target / detected_F0      (--ref auto)
+%
+% so for every input BELOW the reference the request is LARGER than target/ref and
+% the ceiling binds.  All of 测试2.wav (detected 148.5 Hz) hit it, and because the
+% preset with the LOWEST target also carried the LOWEST ceiling (child_female
+% 1.316 = 250/190 against child 1.400 = 210/150) the ceilings INVERTED the
+% presets: the 210 Hz preset came out at 207.9 Hz and the 250 Hz preset at only
+% 195.5 Hz, i.e. "child" sounded higher and thinner than "child_female", which is
+% the opposite of the design.  The female recording never showed it because its
+% detected 240.5 Hz is above the reference, so the request is below 1 and the
+% ceiling never engages - which is exactly why the four presets behaved as
+% intended on that file and not on the male one.
+%
+% The ceiling is now target/floor, where 'floor' is the lowest input F0 the preset
+% is meant to handle, so the ceiling no longer depends on where the reference
+% happens to sit:
+%
+%     child         210/100 = 2.100    (was 1.400)
+%     child_bright  235/100 = 2.350    (was 1.567)
+%     child_female  250/100 = 2.500    (was 1.316, reffallback 190 -> 150)
+%
+% THE FLOORS MUST BE ORDERED LIKE THE TARGETS, and that is not cosmetic.  With
+% child_female's floor left at 150 Hz (its old design reference) its ceiling bound
+% harder than child_bright's at 120 Hz, so on a 130 Hz voice child_female still
+% came out at 217 Hz against child_bright's 235 Hz - the same inversion as before,
+% just moved from the middle of the range to the bottom.  Equal floors cannot
+% invert anything, because the applied factor is then min(target/F0, target/floor)
+% and the target is the only thing that differs.  The floor alone decides where the
+% clamp starts; which pitch each preset aims at is still the target's job.
+%
+% The ceiling still does its real job - bounding the ratio for an unusually deep
+% voice, where target/F0 would otherwise exceed an octave - while the output
+% ceiling above owns the opposite end.  The two knobs now act on opposite ends of
+% the input range instead of fighting over the middle.
 preset = lower(strrep(char(string(s.preset)), '-', '_'));
 switch preset
     % Tilt values are calibrated so the formant stage does not change the overall
@@ -211,15 +251,22 @@ switch preset
         % spectral centroid 1244 Hz against 1356 Hz for the 235 Hz preset, i.e. 8 %
         % less bright, with the same harmonic-to-total ratio.
         %
-        % 'ratiomax' is this preset's OWN design ratio 210/150.  It was inherited
-        % as 1.567 while this preset was the alternative, and that clamped a 148.9 Hz
-        % input straight back up to x1.567 = 235 Hz - i.e. it produced exactly the
-        % preset it was supposed to be the gentler alternative to.  Caught by the
-        % demo check that asserts the design-point ratio, which is why that check is
-        % written against the design point rather than against the test signal.
+        % 'ratiomax' history: this preset inherited 1.567 from the preset it was
+        % split off from while it was still the alternative, and that clamped a
+        % 148.9 Hz input straight back up to x1.567 = 235 Hz - i.e. it produced
+        % exactly the preset it was supposed to be the gentler alternative to.
+        % Caught by the demo check that asserts the design-point ratio, which is why
+        % that check is written against the design point rather than against the
+        % test signal.
+        %
+        % It is now target/floor = 210/100, because writing it as the design ratio
+        % 210/150 made the ceiling bind for every voice below the 150 Hz reference -
+        % which is most male voices, and it made a x1.400 ceiling beat the x1.414 the
+        % preset actually needs at 148.5 Hz.  The floor is shared with the other two
+        % child presets on purpose.  See the note above the switch.
         pp = struct('pitch', 5, 'formant', 1.15, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 210, 'tremor', 0, 'breath', 0, ...
-                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 210 / 150, ...
+                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 210 / 100, ...
                     'pitch0', 210 / 150, 'formant0', 1.15, ...
                     'nfft', 1024, 'hop', 256);
     case {'child_bright', 'kid_bright'}
@@ -228,13 +275,20 @@ switch preset
         % Same nfft/hop reasoning as above.
         pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
                     'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, ...
-                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 1.567, ...
+                    'ref', 'auto', 'reffallback', 150, 'maxf0', 320, 'ratiomax', 235 / 100, ...
                     'pitch0', 235 / 150, 'formant0', 1.22, ...
                     'nfft', 1024, 'hop', 256);
     case {'child_female', 'girl'}
+        % For a female input.  Its DESIGN reference is 190 Hz (the reffallback),
+        % which is where x1.316 comes from, but the ceiling is target/floor =
+        % 250/100, the same floor the other two child presets use.  With the old
+        % 1.316 the ceiling bound for every input below 190 Hz, so this preset
+        % delivered less pitch than the 210 Hz child preset on the male recording.
+        % The reffallback stays 190 Hz: that is the input this preset is built
+        % around when detection fails.
         pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, ...
-                    'ref', 'auto', 'reffallback', 190, 'maxf0', 340, 'ratiomax', 1.316, ...
+                    'ref', 'auto', 'reffallback', 190, 'maxf0', 340, 'ratiomax', 250 / 100, ...
                     'pitch0', 250 / 190, 'formant0', 1.18, ...
                     'nfft', 1024, 'hop', 256);
     case {'elder', 'old', 'elder_male', 'old_man'}
@@ -365,6 +419,12 @@ tA = tic;
 A0 = vc_analyze(x, fs);
 tAnalyze = toc(tA);
 
+% 'auto' as the reference is the documented way for a preset to scale to the
+% speaker, and it is the default for the child presets.  It also decides whether
+% the output pitch ceiling may act at all - see the note on it below.
+autoRef = (ischar(cfg.pitchRef) || isstring(cfg.pitchRef)) && ...
+          strcmpi(char(string(cfg.pitchRef)), 'auto');
+
 if strcmp(cfg.pitchMode, 'abs')
     % The reference is either a number, or 'auto' meaning "use the measured F0 of
     % this recording".  Auto is what makes one preset scale to the speaker: an
@@ -398,6 +458,7 @@ if strcmp(cfg.pitchMode, 'abs')
     end
     cfg.pitchRef   = ref;
     cfg.pitchRatio = cfg.pitchTarget / ref;
+    cfg.pitchAsked = cfg.pitchRatio;           % before either ceiling, for tests
 elseif ~isempty(cfg.pitchRatio)
     % explicit factor (--ratio or preset ratio): keep as is
     cfg.pitchRatio = cfg.pitchRatio;
@@ -414,10 +475,22 @@ end
 % The ceiling needs a usable F0 estimate; if the tracker did not find voiced
 % frames (A0.f0 = NaN) there is nothing to cap against and it is skipped, with
 % the ratio still bounded by the absolute limit below.
+%
+% IT IS DISABLED WHEN THE REFERENCE IS 'auto', AND THAT IS THE POINT OF AUTO.
+% The ceiling exists to stop a FIXED reference from driving a high input too far:
+% with ref pinned at 150 Hz, a 250 Hz speaker asks for x1.567 = 391 Hz, which is
+% why a ceiling was needed at all.  Auto reference asks for target/detected, so
+% the output IS the target by construction and there is no runaway to cap - the
+% ceiling can only take the preset away from its own target.  Measured on the
+% 148.5 Hz male recording: with the ceiling active, 'child' stopped at 207.9 Hz
+% and 'child_female' at 195.5 Hz - the preset with the HIGHER target came out
+% LOWER, because its ceiling (340 Hz) is reached sooner than child's (320 Hz).
+% Both now land on their targets.  --max-f0 still overrides explicitly, and the
+% ratio ceiling below still bounds the low end in both modes.
 cfg.maxF0 = [];
 if isfield(s, 'max_f0') && ~isempty(s.max_f0)
     cfg.maxF0 = getnum(s.max_f0);              % --max-f0 overrides the preset
-elseif isfield(pp, 'maxf0') && ~isempty(pp.maxf0)
+elseif isfield(pp, 'maxf0') && ~isempty(pp.maxf0) && ~autoRef
     cfg.maxF0 = pp.maxf0;
 end
 capped = false;
@@ -462,7 +535,14 @@ if ~isempty(cfg.ratioMax) && isfinite(cfg.ratioMax) && cfg.ratioMax > 0 && ...
     cfg.ratioCapped = true;
 end
 
-cfg.pitchRatio = max(0.4, min(2.2, cfg.pitchRatio));
+% Absolute guard on the factor.  It used to be 2.2, which is a THIRD ceiling and
+% the tightest of the three: with the shared 100 Hz floor the child presets ask
+% for up to 2.50 (250/100), so 2.2 would have cut the 250 Hz preset to 220 Hz on a
+% 100 Hz voice - below child_bright's 235 Hz, i.e. the same inversion again, just
+% further down.  The preset floors are the intended bound; this is only a
+% sanity guard against a nonsense request, so it sits at the widest factor the
+% resampler and the FFT stages were tested over.
+cfg.pitchRatio = max(0.4, min(4, cfg.pitchRatio));
 r = cfg.pitchRatio;
 
 % Formant factor.  DEFAULT IS FIXED: the child presets use their design factor
@@ -648,6 +728,7 @@ info = struct('fs', fs, 'n', n, 'preset', preset, 'f0_in', A0.f0, ...
     'tremor_pct', cfg.tremor, 'breath_pct', cfg.breath, ...
     'target_f0', NaN, 'pitch_ref', cfg.pitchRef, 'outfile', outName, ...
     'max_f0', cfg.maxF0, 'pitch_capped', cfg.pitchCapped, ...
+    'pitch_asked', cfg.pitchAsked, ...
     'pitch_raw_ratio', cfg.pitchRawRatio, ...
     'ratio_max', cfg.ratioMax, 'ratio_capped', cfg.ratioCapped, ...
     'formant_tracked', cfg.formantTrack, ...

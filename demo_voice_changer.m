@@ -50,7 +50,7 @@ fprintf('test signal: %.2f s @ %g Hz, steady F0 = %.0f Hz, formants = %s Hz\n\n'
 fprintf('reference measurement: F0 %6.1f Hz, tracked peak %6.1f Hz\n\n', ...
         vc_analyze(x, fs).f0, peak_hz(x, fs, 300, 1500));
 
-presets = {'normal', 'child', 'child_female', 'elder', 'elder_female'};
+presets = {'normal', 'child', 'child_bright', 'child_female', 'elder', 'elder_female'};
 ok = true;
 f0_in = vc_analyze(x, fs).f0;
 f1_in = peak_hz(x, fs, 300, 1500);          % the peak that will be tracked
@@ -162,33 +162,84 @@ end
 % 210 Hz preset the default.  This check asserts each preset as a PAIR and asserts
 % the 1024/256 frame size they rely on (see VOICE_CHANGER).
 dc2 = {};
-% The ratios are asserted against each preset's own DESIGN REFERENCE, not against
-% the 120 Hz test vowel.  With the automatic reference the child presets clamp the
-% pitch ratio at their design value as soon as the input is below it, which is
-% exactly why a 120 Hz input gives x1.400 for the 210 Hz preset rather than
-% 210/120.  Making the check use the test vowel's own F0 would assert the clamp,
-% not the preset.
-pairs = {'child', 210, 150, 1.15; 'child_bright', 235, 150, 1.22; 'child_female', 250, 190, 1.18};
+% Each row is  name | target Hz | reference Hz | floor Hz | formant factor.
+% 'reference' is where the fixed ratio would be requested; 'floor' is the lowest
+% input F0 the preset is meant to handle and is therefore where the RATIO CEILING
+% sits (ratiomax = target/floor).  Asserting the ceiling here is what the old
+% version of this check missed: it asserted target/reference, which the ceiling
+% used to BE, so a ceiling that made the preset unreachable on low voices passed.
+pairs = {'child',        210, 150, 100, 1.15; ...
+         'child_bright', 235, 150, 100, 1.22; ...
+         'child_female', 250, 190, 100, 1.18};
 for k = 1:size(pairs, 1)
-    want = pairs{k, 2} / pairs{k, 3};
-    [~, ip] = voice_changer(x, '--preset', pairs{k, 1}, '--quiet');
-    bad = abs(ip.pitch_ratio - want) > 0.02 || abs(ip.formant_ratio - pairs{k, 4}) > 1e-6;
-    if abs(ip.pitch_ratio - want) > 0.02
-        dc2{end + 1} = sprintf('%s pitch x%.3f, expected x%.3f (%g/%g design point)', ...
-                               pairs{k, 1}, ip.pitch_ratio, want, pairs{k, 2}, pairs{k, 3});
+    nm = pairs{k, 1};
+    ceil_ = pairs{k, 2} / pairs{k, 4};             % ratio ceiling
+    [~, ip] = voice_changer(x, '--preset', nm, '--quiet');
+    % The ratio the driver must apply for THIS input: what the preset asked for
+    % (target/reference, where the reference is the fallback because auto
+    % detection always succeeds on this vowel), cut down by the ratio ceiling.
+    % The output ceiling is deliberately absent here: it is disabled whenever the
+    % reference is 'auto', because with auto the requested ratio already puts the
+    % output AT the target (see the note in VOICE_CHANGER).
+    apex = min(ip.pitch_asked, ceil_);
+    if abs(ip.ratio_max - ceil_) > 1e-6
+        dc2{end + 1} = sprintf('%s ratio ceiling %.3f, expected %g/%g = %.3f', ...
+                               nm, ip.ratio_max, pairs{k, 2}, pairs{k, 4}, ceil_);
     end
-    if abs(ip.formant_ratio - pairs{k, 4}) > 1e-6
+    if abs(ip.pitch_ratio - apex) > 1e-6
+        dc2{end + 1} = sprintf('%s applied x%.4f, expected x%.4f (asked x%.4f, ceiling x%.3f)', ...
+                               nm, ip.pitch_ratio, apex, ip.pitch_asked, ceil_);
+    end
+    if ip.pitch_ref < pairs{k, 4} && ~ip.ratio_capped
+        dc2{end + 1} = sprintf('%s did not clamp below its floor (F0 %.1f)', ...
+                               nm, ip.pitch_ref);
+    end
+    if abs(ip.formant_ratio - pairs{k, 5}) > 1e-6
         dc2{end + 1} = sprintf('%s formant x%.3f, expected x%.3f', ...
-                               pairs{k, 1}, ip.formant_ratio, pairs{k, 4});
+                               nm, ip.formant_ratio, pairs{k, 5});
     end
     if ip.formant_ratio >= ip.pitch_ratio
         dc2{end + 1} = sprintf('%s scales the tract as much as the pitch (x%.2f >= x%.2f)', ...
-                               pairs{k, 1}, ip.formant_ratio, ip.pitch_ratio);
+                               nm, ip.formant_ratio, ip.pitch_ratio);
     end
-    fprintf('  %-13s design %3.0f/%3.0f Hz -> pitch x%.3f, formant x%.3f (tract < pitch) | %s\n', ...
-            pairs{k, 1}, pairs{k, 2}, pairs{k, 3}, ip.pitch_ratio, ip.formant_ratio, ...
-            ternary(bad, 'CHECK', 'OK'));
+    fprintf('  %-13s design %3.0f/%3.0f Hz, floor %3.0f Hz -> ceiling x%.3f, applied x%.3f, formant x%.3f\n', ...
+            nm, pairs{k, 2}, pairs{k, 3}, pairs{k, 4}, ip.ratio_max, ...
+            ip.pitch_ratio, ip.formant_ratio);
 end
+fprintf('  (this test vowel is %.0f Hz, below every floor, so all three are clamped)\n', f0);
+
+% ---- the ceilings must not INVERT the presets on a male-range input ----
+% This is the regression test for the bug that made 'child' sound higher and
+% thinner than 'child_female'.  The ceilings were the presets' design ratios
+% (1.400 for the 210 Hz preset, 1.316 for the 250 Hz preset), so for any input
+% below the 150/190 Hz references the ceiling decided the output and the lowest
+% target preset delivered the SMALLEST shift:
+%
+%     old:  child 1.400 > child_female 1.316      -> inverted
+%     new:  child 1.909 < child_bright 1.958 < child_female 1.667 ... but the
+%           applied factor is target/F0, so the outputs order 210 < 235 < 250 Hz
+%
+% The check is on the APPLIED factor against a low input, because that is what the
+% user hears; the input is synthesized here rather than taken from the test vowel
+% so that it sits in the male range where the old ceilings bound.
+lowf0 = 130;
+[xl, ~] = steady_vowel(fs, 0.8, lowf0, form);
+lf = fullfile(tempdir, 'vc_demo_low.wav');
+audiowrite(lf, xl, fs);
+order = zeros(1, 3);
+for k = 1:3
+    [~, il] = voice_changer(lf, '--preset', pairs{k, 1}, '--quiet');
+    order(k) = il.pitch_ratio * il.pitch_ref;      % the output F0 the driver aims at
+end
+delete(lf);
+if ~(order(1) < order(2) && order(2) < order(3))
+    dc2{end + 1} = sprintf(['the presets are out of order on a %g Hz input: ' ...
+                            'child %.0f Hz, child_bright %.0f Hz, child_female %.0f Hz ' ...
+                            '(must increase with the target)'], lowf0, order(1), order(2), order(3));
+end
+fprintf(['  male-range input %g Hz -> output child %.0f Hz, child_bright %.0f Hz, ' ...
+         'child_female %.0f Hz (must increase) | %s\n'], lowf0, order(1), order(2), order(3), ...
+        ternary(isempty(dc2), 'OK', 'CHECK'));
 for k = 1:numel(dc2)
     fprintf('    ! %s\n', dc2{k});
     ok = false;

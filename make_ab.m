@@ -1,12 +1,21 @@
 function make_ab()
 %MAKE_AB  Render a listening comparison for the male -> child conversion.
-%   Writes A/B_*.wav at 16 kHz:
+%   Writes AB_*.wav at 16 kHz:
 %     A_dry           input, 16 kHz (the reference for A/B)
-%     B_child         the default child preset (F0 210 Hz, formant x1.15)
-%     C_child_bright  the previous default (F0 235 Hz, formant x1.22)
+%     B_child         the default child preset (target 210 Hz, formant x1.15)
+%     C_child_bright  the previous default (target 235 Hz, formant x1.22)
 %     D_child_light   default child with a smaller formant factor (1.10)
 %     E_pv_only       pitch stages only: no formant, no tilt, no normalisation
-%     F_child_prev    child as it behaved before the resampler fix
+%     F_child_prev    child with the OLD ratio ceiling 1.400 - i.e. what it did
+%                     before the ceilings were rewritten as target/floor
+%     G_cf_prev       child_female with the OLD ratio ceiling 1.316
+%     H_cf_new        child_female as it now behaves (target 250 Hz)
+%
+%   F/G/H are the A/B for the ceiling fix: on this 148.5 Hz male recording the old
+%   ceilings put child at 207.9 Hz and child_female at 195.5 Hz, which is why
+%   "child" sounded higher and thinner than "child_female".  The new ceilings put
+%   them at their targets, 210 and 250 Hz.  See the note above the preset switch
+%   in VOICE_CHANGER for the rule.
 here = fileparts(mfilename('fullpath'));
 cd(here);
 fs = 16000;
@@ -29,38 +38,21 @@ R = { ...
     'AB_01_B_child.wav',        @() voice_changer(x, '--preset', 'child', '--quiet'); ...
     'AB_02_C_child_bright.wav', @() voice_changer(x, '--preset', 'child_bright', '--quiet'); ...
     'AB_03_D_child_light.wav',  @() voice_changer(x, '--preset', 'child', '--formant', 1.10, '--quiet'); ...
-    'AB_04_E_pv_only.wav',      @() voice_changer(x, '--preset', 'child', '--formant', 1, '--tilt', 0, '--no-normalize', '--quiet')};
+    'AB_04_E_pv_only.wav',      @() voice_changer(x, '--preset', 'child', '--formant', 1, '--tilt', 0, '--no-normalize', '--quiet'); ...
+    'AB_05_F_child_prev.wav',   @() voice_changer(x, '--preset', 'child', '--ratio-max', '1.400', '--quiet'); ...
+    'AB_06_G_cf_prev.wav',      @() voice_changer(x, '--preset', 'child_female', '--ratio-max', '1.316', '--quiet'); ...
+    'AB_07_H_cf_new.wav',       @() voice_changer(x, '--preset', 'child_female', '--quiet')};
 for k = 1:size(R, 1)
     [y, info] = R{k, 2}();
     audiowrite(R{k, 1}, y / max(abs(y)) * 0.9, fs);
-    fprintf('%-26s F0 %5.1f -> %5.1f Hz, pitch x%.3f, formant x%.3f, %5.0f ms\n', ...
-            R{k, 1}, info.f0_in, info.f0_out, info.pitch_ratio, info.formant_ratio, ...
+    fprintf('%-26s F0 %5.1f -> %5.1f Hz, pitch x%.3f%s, formant x%.3f, %5.0f ms\n', ...
+            R{k, 1}, info.f0_in, info.f0_out, info.pitch_ratio, ...
+            ternary(info.ratio_capped, ' (old ceiling)', ''), info.formant_ratio, ...
             1000 * info.time_total);
 end
-
-% the same child conversion with the pre-fix resampler (legacy cutoff)
-setenv('VC_LEGACY_RESAMPLE', '1');
-y = voice_changer(x, '--preset', 'child', '--quiet');
-setenv('VC_LEGACY_RESAMPLE', '');
-audiowrite('AB_05_F_child_prev.wav', y / max(abs(y)) * 0.9, fs);
-fprintf('%-26s written with the old resampler cutoff\n', 'AB_05_F_child_prev.wav');
-
-% what did the user's own render use?
-for f = {'male_child.wav', 'male_child_2.wav'}
-    fn = f{1};
-    if exist(fn, 'file') == 2
-        [yu, fu] = audioread(fn);
-        yu = mean(yu, 2);
-        a = vc_analyze(yu, fu);
-        Sp = abs(fft(yu .* hann(numel(yu)), 2 ^ 17));
-        Sp = Sp(1:2 ^ 16 + 1);
-        fq = (0:2 ^ 16).' * fu / 2 ^ 16;
-        b = fq >= 60;
-        cen = sum(fq(b) .* Sp(b) .^ 2) / sum(Sp(b) .^ 2);
-        fprintf('%-16s %5.2f s @ %5.0f Hz, F0 %6.1f Hz, centroid %5.0f Hz, crest %.1f\n', ...
-                fn, numel(yu) / fu, fu, a.f0, cen, ...
-                max(abs(yu)) / sqrt(mean(yu .^ 2)));
-    end
+fprintf('\nwrote AB_00..AB_07 wav files (16 kHz)\n');
 end
-fprintf('\nwrote AB_00..AB_05 wav files (16 kHz)\n');
+
+function s = ternary(c, a, b)
+if c, s = a; else, s = b; end
 end
