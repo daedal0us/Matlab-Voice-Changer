@@ -567,11 +567,11 @@ classdef voice_changer_app < matlab.apps.AppBase
 
         function s = presetHint(app)
             switch app.PresetDrop.Value
-                case 'child',        s = 'F0 → 210 Hz，共振峰 ×1.15';
-                case 'child_bright', s = 'F0 → 235 Hz，共振峰 ×1.22，更亮';
-                case 'child_female', s = 'F0 → 250 Hz，共振峰 ×1.18，适合女声输入';
+                case 'child',        s = 'F0 → 210 Hz，共振峰 ×1.15（童声，默认）';
+                case 'child_bright', s = 'F0 → 235 Hz，共振峰 ×1.22，更高更亮';
+                case 'child_female', s = 'F0 → 250 Hz，共振峰 ×1.18（女童声）';
                 case 'elder',        s = 'F0 ×0.86，共振峰 ×0.94，加颤抖与气声';
-                case 'elder_female', s = 'F0 ×0.90，共振峰 ×0.96，适合女声输入';
+                case 'elder_female', s = 'F0 ×0.90，共振峰 ×0.96，音高更高的老人音';
                 otherwise,           s = '不变声，用于对照';
             end
         end

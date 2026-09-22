@@ -40,15 +40,23 @@ function [y, info] = voice_changer(varargin)
 %   ---------------------------------------------------------------------
 %   PRESETS (--preset)
 %     normal / adult / male / none  identity (A/B reference, 1:1)
-%     child                         child-like voice:  F0 -> 210 Hz, formants x1.15
+%     child                         BOY-like child voice:  F0 -> 210 Hz, formants x1.15
 %                                   (the default; child_soft is an alias)
 %     child_bright                  the same idea, more tract change and higher:
 %                                   F0 -> 235 Hz, formants x1.22 (see the FORMANTS
 %                                   note: the two factors have to move together)
-%     child_female                  child-like voice for a female input: F0 -> 250 Hz
+%     child_female                  GIRL-like child voice:  F0 -> 250 Hz, formants x1.18
 %     elder, elder_male             elderly voice:     F0 x0.86, formants x0.94,
 %                                   tremor + breathiness + duller spectrum
-%     elder_female                  gentler elderly transform for high voices
+%     elder_female                  gentler elderly transform, higher pitch
+%
+%   THE CHILD PRESETS ARE NAMED FOR THE TARGET VOICE, NOT FOR THE INPUT.  Any
+%   input can use any of them: 'child' produces a boy-like child voice, and
+%   'child_female' a girl-like one (higher and slightly brighter).  Which one to
+%   pick depends on the child voice wanted, not on the sex of the recording.  The
+%   names are historical - the female one was added for female inputs, where the
+%   design reference differs - and are kept because renaming a preset breaks
+%   every command line that uses it.
 %
 %   OPTIONS (all optional, command line wins over the preset)
 %     --pitch   <semitones>   relative pitch shift  (+12 = one octave up)
@@ -315,13 +323,17 @@ switch preset
                     'pitch0', 235 / 150, 'formant0', 1.22, ...
                     'nfft', 1024, 'hop', 256);
     case {'child_female', 'girl'}
-        % For a female input.  Its DESIGN reference is 190 Hz (the reffallback),
-        % which is where x1.316 comes from, but the ceiling is target/floor =
-        % 250/100, the same floor the other two child presets use.  With the old
-        % 1.316 the ceiling bound for every input below 190 Hz, so this preset
-        % delivered less pitch than the 210 Hz child preset on the male recording.
-        % The reffallback stays 190 Hz: that is the input this preset is built
-        % around when detection fails.
+        % The GIRL-voice preset: higher and slightly brighter than 'child'.  It may
+        % be used on ANY input - the name records where it came from (it was added
+        % for female inputs, whose F0 already sits near the 'child' target) rather
+        % than restricting who may use it.
+        %
+        % Its DESIGN reference is 190 Hz (the reffallback), which is where x1.316
+        % comes from, but the ceiling is target/floor = 250/100, the same floor the
+        % other two child presets use.  With the old 1.316 the ceiling bound for
+        % every input below 190 Hz, so this preset delivered less pitch than the
+        % 210 Hz child preset on the male recording.  The reffallback stays 190 Hz:
+        % that is the input this preset is built around when detection fails.
         pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
                     'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, ...
                     'ref', 'auto', 'reffallback', 190, 'maxf0', 340, ...
@@ -1201,6 +1213,8 @@ fprintf(['voice_changer - command line voice changer (normal / child / elderly)\
     '  y = voice_changer(x, ''--preset'', ''elder'');\n' ...
     '\n' ...
     'presets: child | child_bright | child_female | elder | elder_male | elder_female | normal\n' ...
+    '         child = boy-like child voice, child_female = girl-like (higher);\n' ...
+    '         presets name the TARGET voice, not the input - any input, any preset\n' ...
     'options: --pitch <semitones>  --target <Hz>  --ratio <r>  --ref <Hz|auto>\n' ...
     '         --max-f0 <Hz>  --ratio-max <r>  --allow-down\n' ...
     '         --formant <r>  --formant-track  --tilt <dB/oct>  --tremor <pct>\n' ...
