@@ -429,7 +429,13 @@ lvl = cfg.targetLevelDb;
 % ------------------------------------------------------------- input
 [x, fsIn, inName] = load_audio(s.in, array_fs(varargin));
 x = double(x);
-if size(x, 2) > 1
+% Average the channels only for a GENUINE multichannel matrix.  Testing
+% size(x,2) > 1 alone also catches a row vector, which is a monophonic signal
+% stored as 1xN, and mean(x,2) then collapses it to a single sample - the call
+% dies in the length check below with "input too short: 1 samples" instead of
+% saying anything about the shape.  audioread always returns a column, so this
+% only bites a caller who passes a signal in memory (a GUI, or voice_changer(x,fs)).
+if ~isvector(x)
     x = mean(x, 2);
 end
 if ~isempty(s.fs)
