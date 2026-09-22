@@ -12,6 +12,32 @@ function [y, info] = voice_changer(varargin)
 %   VOICE_CHANGER returns INFO with the detected F0 and the conversion factors.
 %
 %   ---------------------------------------------------------------------
+%   FILE FORMATS - the extension decides, not the code
+%
+%   The pipeline never opens a file itself: it reads through AUDIOREAD and writes
+%   through AUDIOWRITE, so the set of usable formats is exactly what this MATLAB
+%   install's codecs accept, and it is not limited to WAV.  Measured on R2024b
+%   (Windows) by FMT_PROBE.M, which tries every extension end to end:
+%
+%     write (output)  .wav  .flac  .mp3  .m4a  .mp4  .ogg  .oga  .opus
+%                     ... of which .m4a / .mp4 accept only 44.1 or 48 kHz, so a
+%                     16 kHz conversion cannot be written as AAC ("SampleRate
+%                     值不受支持"); use .wav / .flac / .ogg, or resample first.
+%     read  (input)   the same set.  MP4/M4A makes video files usable as input.
+%     rejected        .aiff .aif .au .w64 .caf .webm .mkv .avi .mov - R2024b's
+%                     AUDIOWRITE does not know these extensions at all and errors
+%                     before looking at the data.
+%
+%   An output name with no extension gets '.wav' appended (the only place the
+%   format is chosen for you), --fs resamples the input to a requested rate
+%   instead of preserving it, and a multi-channel input is averaged to mono.
+%
+%   Use WAV or FLAC for anything you intend to MEASURE.  MP3/OGG/OPUS/M4A are
+%   lossy: the codec's own lowpass and its encoder delay shift the waveform (a
+%   1.100 s file came back as 1.155 s through MP3), which is fine for listening
+%   but moves the F0 estimate and every timing figure.
+%
+%   ---------------------------------------------------------------------
 %   PRESETS (--preset)
 %     normal / adult / male / none  identity (A/B reference, 1:1)
 %     child                         child-like voice:  F0 -> 210 Hz, formants x1.15

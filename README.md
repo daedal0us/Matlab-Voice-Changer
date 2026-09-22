@@ -73,7 +73,29 @@ matlab -batch "run_voice_changer --selftest"    :: 跑自检，通过返回 0
 matlab -batch "demo_voice_changer"              :: 自检 + 基准测试（更详细）
 ```
 
-## 1.5 退出码与脚本化
+## 1.5 支持的音频格式
+
+**不限于 WAV。** 脚本自己从不打开文件，读靠 `audioread`、写靠 `audiowrite`，所以可用格式就是这个
+MATLAB 安装里的编解码器支持什么（[`audiowrite` 的格式列表](https://www.mathworks.com/help/matlab/ref/audiowrite.html)）。
+在 **R2024b / Windows** 上用 `fmt_probe.m` 端到端实测（逐个扩展名真的走一遍完整转换）：
+
+| 用途 | 可用扩展名 | 备注 |
+|---|---|---|
+| **输出** | `.wav` `.flac` `.mp3` `.m4a` `.mp4` `.ogg` `.oga` `.opus` | `.m4a`/`.mp4` **只接受 44.1 / 48 kHz**，16 kHz 转换结果存不进去（报 `SampleRate 值不受支持`） |
+| **输入** | 同上 | `.mp4`/`.m4a` 可行，所以视频文件也能直接当输入 |
+| **不可用** | `.aiff` `.aif` `.au` `.w64` `.caf` `.webm` `.mkv` `.avi` `.mov` | R2024b 的 `audiowrite` **根本不认这些扩展名**，在检查数据之前就报错（不是编码器的问题） |
+
+行为细节：
+
+* **输出名不带扩展名时自动补 `.wav`** —— 这是唯一一处替你决定格式的地方。
+* 输出采样率**默认跟随输入**；`--fs` 才是显式重采样输入。
+* 多声道输入（立体声等）**取平均降为单声道**，输出恒为单声道。
+* 无损格式（`.wav` `.flac`）**建议用于任何要做测量的场合**。有损格式会引入编码器延迟与自带低通：
+  同一个 1.100 s 信号经 MP3 往返回来变成 **1.155 s**，听感无所谓，但会挪动 F0 估计和所有时间类读数。
+
+复现这张表：`matlab -batch "fmt_probe"`（结果写在 `fmt_probe.txt`，测试文件写在系统临时目录并在结束时清理）。
+
+## 1.6 退出码与脚本化
 
 | 情况 | 退出码 |
 |---|---|
@@ -87,7 +109,8 @@ matlab -batch "demo_voice_changer"              :: 自检 + 基准测试（更�
 
 ```bat
 @echo off
-for %%F in (rec\*.wav) do (
+:: 输入可以是任何受支持的格式（见 §1.5），不一定是 wav
+for %%F in (rec\*.wav rec\*.flac rec\*.m4a) do (
     matlab -batch "run_voice_changer('child','%%F','out\%%~nF_child.wav','--quiet')"
     if errorlevel 1 echo FAILED: %%F
 )
@@ -98,13 +121,13 @@ Python 调用示例：
 ```python
 import subprocess, sys
 cmd = ['matlab', '-batch',
-       "run_voice_changer('child','rec.wav','kid.wav')"]
+       "run_voice_changer('child','rec.m4a','kid.flac')"]   # 读 m4a、写 flac 都可以
 p = subprocess.run(cmd, capture_output=True, text=True)
 if p.returncode != 0:
     print('failed:', p.stdout, p.stderr)
 ```
 
-## 1.6 性能预期（重要）
+## 1.7 性能预期（重要）
 
 | 项目 | 实测（本机 R2024b） |
 |---|---|
@@ -322,7 +345,10 @@ y = voice_changer(x, '--fs', fs, '--preset', 'child');   % 或选项形式
    儿童音预设改用 1024/256 长窗。**剩下的必须换成基音同步算法（TD-PSOLA 一类）才能根治**，
    见 §8。
 4. 老人音的颤音/气声是**合成**效果，用于听感上的"衰老感"，不是生理建模。
-5. **采样率**：44.1/48 kHz 长文件处理时间是 16 kHz 的约 3 倍，建议先降采样（见 1.6）。
+5. **采样率**：44.1/48 kHz 长文件处理时间是 16 kHz 的约 3 倍，建议先降采样（见 1.7）。
+6. **格式**：`.m4a` / `.mp4` 输出只接受 44.1 / 48 kHz（AAC 编码器限制），16 kHz 结果会报
+   `SampleRate 值不受支持`；`.aiff` / `.au` / `.w64` / `.caf` / 视频容器等扩展名 R2024b 的
+   `audiowrite` 完全不认。有损格式会挪动 F0 与时间读数。详见 §1.5。
 6. 清音/白噪段不参与共振峰变换（包络增益在无声段被掩蔽），因此不会把噪声放大成金属声。
 7. **共振峰因子默认固定，不做"按音高缩放"**（`--formant-track` 为实验开关，默认关）。
    原因不是精度而是**可复现性**：开启缩放时，判定条件是把**原始音高倍率**与预设设计点
@@ -421,13 +447,14 @@ y = voice_changer(x, '--fs', fs, '--preset', 'child');   % 或选项形式
 | `vc_synthvoice.m` | 源-滤波器合成测试语音（含韵律起伏，用于长文件基准） |
 | `demo_voice_changer.m` | 自检 + 基准测试（稳态元音 + 独立测量 + 时间轴检查） |
 | `make_ab.m` | 生成 §7 的试听对照文件（`AB_*.wav`） |
+| `fmt_probe.m` | 音频格式支持实测（§1.5 那张表，逐个扩展名走完整转换） |
 
 运行 `demo_voice_changer` 会生成 `demo_voice.wav` 与 `out_<preset>.wav` 供试听。
 `*.wav` 已在 `.gitignore` 中排除（音频不进版本库）。
 
 ---
 
-# 八、环境要求
+# 九、环境要求
 
 * MATLAB **R2024b**（R2016b+ 即可，用到隐式扩展）。
 * **不需要任何工具箱**：本机 `license('test','signal'/'audio'/'dsp')` 全部返回 0，
