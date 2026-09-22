@@ -460,7 +460,6 @@ if isfield(s, 'phase_lock') && (islogical(s.phase_lock) || isnumeric(s.phase_loc
     cfg.phaseLock = true;
 end
 
-lvl = cfg.targetLevelDb;
 % THE CEILING IS NOW A CLIPPING GUARD, NOT A LEVEL.  When the level rule was
 % "normalise to a fixed -18 dBFS", the ceiling and the level were the same
 % number, so --target-level made sense as a loudness control.  The rule is now
