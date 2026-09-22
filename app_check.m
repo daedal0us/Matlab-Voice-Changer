@@ -44,8 +44,8 @@ end
 
 % The row/column map the layout intends.  Anything else means a control moved.
 want = struct('PresetDrop', [2 1], 'OpenButton', [2 3], 'OutField', [3 3], ...
-              'BrowseButton', [3 4], 'Ax', [4 4], 'ProcessButton', [5 4], ...
-              'PlayAButton', [6 2], 'PlayBButton', [6 4], 'StatusLabel', [7 4]);
+              'BrowseButton', [3 4], 'Ax', [5 4], 'ProcessButton', [6 4], ...
+              'PlayAButton', [7 2], 'PlayBButton', [7 4], 'StatusLabel', [8 4]);
 for k = 1:numel(names)
     L = app.(names{k}).Layout;
     w = want.(names{k});
@@ -81,6 +81,27 @@ if any(ocol == pcol)
     fprintf('  !! the open button covers the preset dropdown\n');
 end
 
+% The two labels that name the dropdown and the output field must own their
+% cells too.  They are not in `names` above, so nothing else would catch a label
+% landing on top of a control.
+labels = findobj(app.UIFigure, 'Type', 'uilabel');
+fprintf('labels: %d found\n', numel(labels));
+for k = 1:numel(labels)
+    if strcmp(labels(k).Text, app.StatusLabel.Text)
+        continue                          % the status label was checked above
+    end
+    L = labels(k).Layout;
+    if isempty(L.Row)
+        continue
+    end
+    key = sprintf('r%dc%d', L.Row, L.Column(1));
+    if isfield(cells, key)
+        ok = false;
+        fprintf('  !! label "%s" shares cell %s with %s\n', labels(k).Text, key, cells.(key));
+    end
+    fprintf('  label "%-6s" row %d col %d (own cell)\n', labels(k).Text, L.Row, L.Column(1));
+end
+
 %% 2c. underscore safety: preset names must not be TeX-interpreted ---------
 % 'child_female' printed into a TeX-interpreted text object renders as
 % child_female with an italic SUBSCRIPT f - a real bug reported from a
@@ -106,6 +127,32 @@ if ~contains(app.StatusLabel.Text, 'child_female')
 end
 app.PresetDrop.Value = 'child';
 app.PresetDrop.ValueChangedFcn(app.PresetDrop, struct());
+
+%% 2d. the output-format rule behind the 输出路径 dialog -------------------
+% uiputfile reports the chosen FILTER INDEX and returns a name carrying whatever
+% extension it was given, so the dialog's handler must force the extension from
+% the filter.  Not doing so was the "pick MP3, then pick WAV, nothing happens"
+% bug: choosing a filter changed no text because the name kept its old extension.
+% The dialog itself cannot be driven from here, so the rule it relies on is
+% checked directly.
+cases = {'x.wav','.mp3'; 'x.mp3','.wav'; 'x','.flac'; 'x.WAV','.ogg'; ...
+         'name.with.dots.wav','.mp3'; 'noext','.m4a'};
+allok = true;
+for k = 1:size(cases, 1)
+    got = voice_changer_app.replace_ext(cases{k, 1}, cases{k, 2});
+    [~, ~, had] = fileparts(cases{k, 1});
+    wantname = [erase(cases{k, 1}, had) cases{k, 2}];
+    if ~strcmp(got, wantname)
+        allok = false;
+        fprintf('  !! replace_ext("%s","%s") -> "%s", wanted "%s"\n', ...
+            cases{k, 1}, cases{k, 2}, got, wantname);
+    end
+end
+fprintf('\noutput extension rule: %d cases, format follows the dialog filter ', size(cases, 1));
+fprintf('rather than the typed name: %s\n', ternary(allok, 'OK', 'CHECK'));
+if ~allok
+    ok = false;
+end
 
 % 原始 and 变声 must render at the same width.
 % Component Position is NOT usable here: -batch has no rendered layout, so every

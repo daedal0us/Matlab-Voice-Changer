@@ -73,9 +73,18 @@ classdef voice_changer_app < matlab.apps.AppBase
             % panel would also work in principle, but a panel placed in a grid
             % cell does not pick up the cell geometry (measured: a 410x44 cell
             % held a 260x221 panel), so the flat layout is used.
-            app.Grid = uigridlayout(app.UIFigure, [7 4]);
-            app.Grid.RowHeight   = {16, 56, 32, '1x', 44, 44, 24};
+            app.Grid = uigridlayout(app.UIFigure, [8 4]);
+            app.Grid.RowHeight   = {20, 40, 56, 32, '1x', 44, 44, 24};
             app.Grid.ColumnWidth = {150, '1x', '1x', '1x'};
+
+            % Row 1 names the preset dropdown, so the choice is not an unlabelled
+            % box.  A label needs its own row: two widgets in one cell stack on
+            % top of each other - the failure mode that once hid this very
+            % dropdown behind the open button, which is why app_check now
+            % compares occupied cells.
+            lblPreset = uilabel(app.Grid, 'Text', '预设', 'FontWeight', 'bold', ...
+                'Interpreter', 'none');
+            lblPreset.Layout.Row = 1;        lblPreset.Layout.Column = 1;
 
             app.PresetDrop = uidropdown(app.Grid, ...
                 'Items', {'child','child_bright','child_female', ...
@@ -94,16 +103,20 @@ classdef voice_changer_app < matlab.apps.AppBase
 
             % Output path.  Suggesting it (rather than asking every time) is
             % what makes "打开 -> 转换 -> 听" one click; the field exists so a
-            % second take does not silently overwrite the first.
+            % second take does not silently overwrite the first.  The button
+            % opens a dialog that also PICKS THE FORMAT, so it is named for what
+            % it edits rather than for "saving a copy".
+            lblOut = uilabel(app.Grid, 'Text', '输出', 'Interpreter', 'none');
+            lblOut.Layout.Row = 3;           lblOut.Layout.Column = 1;
             app.OutField = uieditfield(app.Grid, 'text', ...
                 'Value', '', 'ValueChangedFcn', @(s,e) app.onOutEdited());
-            app.OutField.Layout.Row = 3;     app.OutField.Layout.Column = [1 3];
-            app.BrowseButton = uibutton(app.Grid, 'push', 'Text', '另存为…', ...
+            app.OutField.Layout.Row = 3;     app.OutField.Layout.Column = [2 3];
+            app.BrowseButton = uibutton(app.Grid, 'push', 'Text', '输出路径…', ...
                 'ButtonPushedFcn', @(s,e) app.onBrowseOut());
             app.BrowseButton.Layout.Row = 3; app.BrowseButton.Layout.Column = 4;
 
             app.Ax = uiaxes(app.Grid);
-            app.Ax.Layout.Row = 4;           app.Ax.Layout.Column = [1 4];
+            app.Ax.Layout.Row = 5;           app.Ax.Layout.Column = [1 4];
             xlabel(app.Ax, '时间 (s)');
             ylabel(app.Ax, '幅度');
             grid(app.Ax, 'on');
@@ -123,19 +136,19 @@ classdef voice_changer_app < matlab.apps.AppBase
             % toggles, each spanning half the grid so they match.
             app.ProcessButton = uibutton(app.Grid, 'push', 'Text', '转换', ...
                 'ButtonPushedFcn', @(s,e) app.onProcess());
-            app.ProcessButton.Layout.Row = 5;  app.ProcessButton.Layout.Column = [1 4];
+            app.ProcessButton.Layout.Row = 6;  app.ProcessButton.Layout.Column = [1 4];
             app.PlayAButton = uibutton(app.Grid, 'push', 'Text', '▶ 原始', ...
                 'ButtonPushedFcn', @(s,e) app.playA());
-            app.PlayAButton.Layout.Row = 6;    app.PlayAButton.Layout.Column = [1 2];
+            app.PlayAButton.Layout.Row = 7;    app.PlayAButton.Layout.Column = [1 2];
             app.PlayBButton = uibutton(app.Grid, 'push', 'Text', '▶ 变声', ...
                 'ButtonPushedFcn', @(s,e) app.playB());
-            app.PlayBButton.Layout.Row = 6;    app.PlayBButton.Layout.Column = [3 4];
+            app.PlayBButton.Layout.Row = 7;    app.PlayBButton.Layout.Column = [3 4];
             app.PlayAButton.Enable = 'off';     % nothing loaded yet
             app.PlayBButton.Enable = 'off';     % nothing converted yet
 
             app.StatusLabel = uilabel(app.Grid, 'Text', '就绪：先打开一个音频文件', ...
                 'Interpreter', 'none');
-            app.StatusLabel.Layout.Row = 7;
+            app.StatusLabel.Layout.Row = 8;
             app.StatusLabel.Layout.Column = [1 4];
         end
     end
@@ -167,18 +180,39 @@ classdef voice_changer_app < matlab.apps.AppBase
         end
 
         function onBrowseOut(app)
+            % Extensions offered, in the order of the filter list below.  The
+            % filter INDEX is what tells us the format the user picked - the
+            % returned file name carries the extension of the DEFAULT name, not
+            % the chosen filter, and uiputfile does not append anything.  That was
+            % the "switching to MP3 then back to WAV does nothing" bug: choosing a
+            % filter changed no text, so the field still showed the old .wav path.
+            exts = {'.wav', '.flac', '.mp3', '.m4a', '.ogg'};
+            desc = {'WAV (*.wav)', 'FLAC (*.flac)', 'MP3 (*.mp3)', ...
+                    'AAC (*.m4a)', 'OGG (*.ogg)'};
+            filters = [strcat('*', exts.') desc.'];
             if isempty(app.FileA)
                 defdir = pwd;
                 defname = ['out_' app.PresetDrop.Value '.wav'];
             else
-                [d, n, e] = fileparts(app.OutField.Value);
+                [d, n] = fileparts(app.OutField.Value);
                 if isempty(d), d = fileparts(app.FileA); end
-                defdir = d;  defname = [n e];
+                defdir = d;
+                % offer the CURRENT name with the WAV extension rather than
+                % whatever extension it happens to carry: the filter list starts
+                % on WAV, and a default name of e.g. .mp3 next to a WAV filter is
+                % what invited the mismatch in the first place.
+                defname = [n '.wav'];
             end
-            [f, p] = uiputfile({'*.wav','WAV (*.wav)'; '*.flac','FLAC (*.flac)'; ...
-                '*.mp3','MP3 (*.mp3)'; '*.m4a','AAC (*.m4a)'; ...
-                '*.ogg','OGG (*.ogg)'}, '保存变声结果为', fullfile(defdir, defname));
+            [f, p, idx] = uiputfile(filters, '输出路径', fullfile(defdir, defname));
             if isequal(f, 0), return; end
+            % The chosen filter wins over whatever extension the name carries.
+            if isnumeric(idx) && idx >= 1 && idx <= numel(exts)
+                want = exts{idx};
+            else
+                [~, ~, want] = fileparts(f);
+                if isempty(want), want = '.wav'; end
+            end
+            f = voice_changer_app.replace_ext(f, want);
             app.OutAuto = false;
             app.OutField.Value = fullfile(p, f);
             app.setStatus(sprintf('输出：%s', app.OutField.Value));
@@ -635,6 +669,22 @@ classdef voice_changer_app < matlab.apps.AppBase
             catch
                 tf = false;
             end
+        end
+    end
+
+    % ---------------- Testable helper ----------------
+    methods (Static, Access = public)
+        function f = replace_ext(f, ext)
+            %REPLACE_EXT  Force the extension of a file name, dropping any it had.
+            %   PUBLIC AND STATIC on purpose: it is the one rule behind the
+            %   输出路径 dialog that app_check can exercise without opening a
+            %   dialog.  The chosen FILTER INDEX decides the format and the name
+            %   must follow it even when the default name carried a different
+            %   extension - ignoring that is what made "pick MP3, then pick WAV"
+            %   look like it did nothing, because the name kept the old extension
+            %   and uiputfile returns it unchanged.
+            [~, n] = fileparts(f);
+            f = [n ext];
         end
     end
 end
