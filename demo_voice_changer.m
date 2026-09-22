@@ -192,6 +192,58 @@ for k = 1:numel(tc)
     ok = false;
 end
 
+% ---- output pitch ceiling: must cap a high input, never touch a low one ----
+% The absolute presets derive their ratio from target/ref, which assumes the
+% input sits near 'ref' (150 Hz for child).  A female input was therefore pushed
+% up by that ratio regardless, which piles energy into the top of the band:
+% measured on a real 44.1 kHz recording the 2-5 kHz share was multiplied by 8.17
+% with no ceiling against 4.54 with one.  The invariant asserted here is that the
+% output pitch never EXCEEDS the ceiling and that the ceiling never engages for an
+% input the preset was designed for - not that it engages for every high input,
+% since a preset may already be gentle enough (child_female at 250 Hz lands on
+% 329 Hz, under its own 340 Hz ceiling, so it is correct for it not to fire).
+% The variable name is deliberately unusual: an earlier version of this block
+% used x_hi and silently clobbered the real-recording check further down, which
+% showed up as a timing ratio of 0.96 instead of 1.57.
+x_fem250 = steady_vowel(fs, 2.0, 250, form);       % female-range input
+for c = {'child', 'child_female'}
+    [~, il] = voice_changer(x, fs, '--preset', c{1}, '--quiet');
+    [~, ih] = voice_changer(x_fem250, fs, '--preset', c{1}, '--quiet');
+    cc = {};
+    if il.pitch_capped
+        cc{end + 1} = sprintf('ceiling engaged on a %g Hz input (it must not)', f0);
+    end
+    if ~isempty(ih.max_f0) && ih.f0_in * ih.pitch_ratio > ih.max_f0 * 1.01
+        cc{end + 1} = sprintf('output F0 %.0f Hz exceeds the %.0f Hz ceiling', ...
+                              ih.f0_in * ih.pitch_ratio, ih.max_f0);
+    end
+    fprintf(['  %-13s ceiling %.0f Hz: %3.0f Hz in -> x%.3f (capped %d) | ' ...
+             '250 Hz in -> x%.3f (capped %d, out %.0f Hz) | %s\n'], ...
+            c{1}, ih.max_f0, f0, il.pitch_ratio, il.pitch_capped, ...
+            ih.pitch_ratio, ih.pitch_capped, ih.f0_in * ih.pitch_ratio, ...
+            ternary(isempty(cc), 'OK', 'CHECK'));
+    for k = 1:numel(cc)
+        fprintf('    ! %s\n', cc{k});
+        ok = false;
+    end
+end
+
+% explicit override: 0 must disable the ceiling again
+[~, i0] = voice_changer(x_fem250, fs, '--preset', 'child', '--max-f0', 0, '--quiet');
+oc = {};
+if i0.pitch_capped
+    oc{end + 1} = '--max-f0 0 should disable the ceiling';
+end
+if abs(i0.pitch_ratio - 235 / 150) > 1e-9
+    oc{end + 1} = 'disabling the ceiling should restore the uncapped ratio';
+end
+fprintf('  --max-f0 0      : 250 Hz in -> x%.3f (capped %d) | %s\n', ...
+        i0.pitch_ratio, i0.pitch_capped, ternary(isempty(oc), 'OK', 'CHECK'));
+for k = 1:numel(oc)
+    fprintf('    ! %s\n', oc{k});
+    ok = false;
+end
+
 % ---- timing check: same length does NOT prove the same speed ----------
 % The span of "audible" samples is compared between input and output.  This test
 % exists because the pitch stage once had its stretch and resample directions
@@ -199,10 +251,21 @@ end
 % length check passed, while the audio played ~2.4x too fast and its tail was
 % silence.  A span (rather than the burst edges) is used so that a recording
 % with long silent stretches does not look like a timing error.
+%
+% The burst carries a 130 Hz harmonic series, not a bare tone, so that the signal
+% still has a voice-range F0.  A pure 1 kHz tone made the F0 tracker report a
+% meaningless value (1 kHz is outside its 60..500 Hz search range), which then
+% made the output pitch ceiling fire on a nonsense ratio - visible here as the
+% printed ratio changing from 1.57 to 0.96 while nothing about the timing was
+% actually wrong.
 tone = zeros(round(4 * fs), 1);
 ta = round(0.60 * fs); tb = round(0.80 * fs);
 tt = (0:numel(tone) - 1).' / fs;
-tone(ta:tb) = 0.7 * sin(2 * pi * 1000 * tt(ta:tb));
+burst = zeros(numel(tone), 1);
+for h = 1:8
+    burst(ta:tb) = burst(ta:tb) + (1 / h) * sin(2 * pi * 130 * h * tt(ta:tb));
+end
+tone(ta:tb) = 0.7 * burst(ta:tb) / max(abs(burst(ta:tb)));
 tone = tone + 1e-4 * randn(numel(tone), 1);       % dither, so the vocoder sees signal everywhere
 [s0, e0] = active_span(tone, fs);
 
@@ -224,11 +287,23 @@ end
 
 % ---- the same check on a real recording, if one is present ------------
 % Real speech is much less periodic than the synthetic vowel and contains silent
-% stretches, so the conversion is verified on it as well.  Any *.wav in the
-% folder is used, preferring one that is not the generated demo file.
+% stretches, so the conversion is verified on it as well.  Picking the file is
+% the tricky part: a folder used for listening tests fills up with CONVERTED
+% files, and those are not source material - running the conversion test on one
+% of them verifies nothing about the original recording (it once selected
+% A_legacy.wav and dutifully reported an F0 of 320.7 Hz, which is the output of a
+% previous conversion rather than a voice).  The source recording is by far the
+% longest file in the folder, so that is the selection rule, with the generated
+% demo and the out_* products excluded.
 realFiles = dir(fullfile(here, '*.wav'));
-realFiles = realFiles(~strcmp({realFiles.name}, 'demo_voice.wav'));
-realFiles = realFiles(~startsWith({realFiles.name}, 'out_'));
+if ~isempty(realFiles)
+    realFiles = realFiles(~strcmp({realFiles.name}, 'demo_voice.wav'));
+    realFiles = realFiles(~startsWith({realFiles.name}, 'out_'));
+end
+if ~isempty(realFiles)
+    [~, iLong] = max([realFiles.bytes]);
+    realFiles = realFiles(iLong);
+end
 if ~isempty(realFiles)
     rn = fullfile(here, realFiles(1).name);
     [xr, fsr] = audioread(rn);

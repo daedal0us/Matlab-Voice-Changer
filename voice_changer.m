@@ -24,6 +24,13 @@ function [y, info] = voice_changer(varargin)
 %     --target  <Hz>          absolute target F0    (child preset: 235 Hz)
 %     --ratio   <r>           pitch factor directly (r = F0_out / F0_in)
 %     --ref     <Hz>          reference F0 used by the child preset (150 Hz)
+%     --max-f0  <Hz>          ceiling on the OUTPUT F0.  The absolute presets
+%                             derive their ratio from target/ref, which assumes
+%                             the input is near ref; a higher input (a female
+%                             voice under --preset child) would otherwise be
+%                             pushed proportionally higher and thin out.  The
+%                             ceiling only ever lowers the ratio.  Use 0 to
+%                             disable it.
 %     --formant <r>           final formant factor (default = pitch ratio)
 %     --tilt    <dB/oct>      spectral tilt about 1 kHz (brightness)
 %     --tremor  <pct>         tremor depth in percent of F0 (elderly)
@@ -80,13 +87,14 @@ t_all = tic;
 % ---------------------------------------------------------------- defaults
 defspec = struct( ...
     'in', [], 'out', '', 'outfile', '', 'preset', 'child', 'pitch', [], ...
-    'target', [], 'ratio', [], 'ref', [], 'formant', [], 'tilt', [], ...
+    'target', [], 'ratio', [], 'ref', [], 'max_f0', [], 'formant', [], 'tilt', [], ...
     'formant_map', [], 'env_lifter', [], ...
     'tremor', [], 'rate', [], 'breath', [], 'fs', [], 'nfft', [], 'hop', [], ...
     'target_level', [], 'normalize', true, 'no_normalize', false);
 
 cfg = struct('fs', 16000, 'nfft', 512, 'hop', 128, 'pitch', 6, ...
-    'pitchMode', 'rel', 'pitchRef', 150, 'pitchRatio', [], 'formant', [], ...
+    'pitchMode', 'rel', 'pitchRef', 150, 'pitchRatio', [], 'maxF0', [], ...
+    'pitchCapped', false, 'formant', [], ...
     'tilt', 0, 'tremor', 0, 'tremorRate', 5, 'wobble', 0.6, 'wobbleRate', 0.7, ...
     'breath', 0, 'targetLevelDb', -18, 'normalize', true, 'seed', 20240);
 
@@ -100,6 +108,16 @@ if args.help
 end
 
 % ------------------------------------------------------------- presets
+% 'maxf0' is an OUTPUT PITCH CEILING, in Hz.  The absolute-target presets derive
+% their ratio as target/ref, which assumes the input sits near 'ref' (150 Hz for
+% child).  A higher input then gets pushed proportionally higher, and because the
+% pitch stage moves every frequency by that factor the result piles energy into
+% the top of the band and thins out.  Measured on a real 44.1 kHz female voice
+% (F0 = 249.9 Hz): the child preset drove it to 391 Hz and multiplied the
+% 2-5 kHz energy share by 8.17, against 3.41 for child_female.  The ceiling caps
+% the output at maxF0 regardless of the input, so one preset behaves sensibly
+% over the whole input range.  It only ever lowers the ratio, so presets are
+% unaffected on the inputs they were designed for.
 preset = lower(strrep(char(string(s.preset)), '-', '_'));
 switch preset
     % Tilt values are calibrated so the formant stage does not change the overall
@@ -110,19 +128,24 @@ switch preset
     % on top of a -20*log10(r) compensation, which measured 35..39 % too dark.
     case {'child', 'kid', 'child_male'}
         pp = struct('pitch', 7, 'formant', 1.22, 'tilt', 1.0, ...
-                    'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, 'ref', 150);
+                    'mode', 'abs', 'target', 235, 'tremor', 0, 'breath', 0, ...
+                    'ref', 150, 'maxf0', 320);
     case {'child_female', 'girl'}
         pp = struct('pitch', 5.5, 'formant', 1.18, 'tilt', 0.5, ...
-                    'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, 'ref', 190);
+                    'mode', 'abs', 'target', 250, 'tremor', 0, 'breath', 0, ...
+                    'ref', 190, 'maxf0', 340);
     case {'elder', 'old', 'elder_male', 'old_man'}
         pp = struct('pitch', -2.5, 'formant', 0.94, 'tilt', -0.25, ...
-                    'mode', 'ratio', 'target', [], 'tremor', 1.0, 'breath', 0.9, 'ref', []);
+                    'mode', 'ratio', 'target', [], 'tremor', 1.0, 'breath', 0.9, ...
+                    'ref', [], 'maxf0', []);
     case {'elder_female', 'old_woman'}
         pp = struct('pitch', -1.8, 'formant', 0.96, 'tilt', -0.25, ...
-                    'mode', 'ratio', 'target', [], 'tremor', 0.8, 'breath', 0.7, 'ref', []);
+                    'mode', 'ratio', 'target', [], 'tremor', 0.8, 'breath', 0.7, ...
+                    'ref', [], 'maxf0', []);
     case {'normal', 'adult', 'male', 'female', 'none', 'identity'}
         pp = struct('pitch', 0, 'formant', 1, 'tilt', 0, ...
-                    'mode', 'ratio', 'target', [], 'tremor', 0, 'breath', 0, 'ref', []);
+                    'mode', 'ratio', 'target', [], 'tremor', 0, 'breath', 0, ...
+                    'ref', [], 'maxf0', []);
     otherwise
         error('voice_changer:preset', 'unknown preset "%s" (child | elder | normal | ...)', preset);
 end
@@ -223,6 +246,33 @@ elseif ~isempty(cfg.pitchRatio)
 else
     cfg.pitchRatio = 2 ^ (cfg.pitch / 12);
 end
+
+% Output pitch ceiling.  target/ref assumes the input is near 'ref'; a higher
+% input would otherwise be pushed proportionally higher and the result piles
+% energy at the top of the band (measured: 391 Hz and 8.17x the 2-5 kHz share
+% for a 250 Hz female input under the child preset).  Capping the OUTPUT rather
+% than the ratio keeps one preset sensible over the whole input range, and it
+% only ever reduces the ratio, so an input near 'ref' is untouched.
+% The ceiling needs a usable F0 estimate; if the tracker did not find voiced
+% frames (A0.f0 = NaN) there is nothing to cap against and it is skipped, with
+% the ratio still bounded by the absolute limit below.
+cfg.maxF0 = [];
+if isfield(s, 'max_f0') && ~isempty(s.max_f0)
+    cfg.maxF0 = getnum(s.max_f0);              % --max-f0 overrides the preset
+elseif isfield(pp, 'maxf0') && ~isempty(pp.maxf0)
+    cfg.maxF0 = pp.maxf0;
+end
+capped = false;
+if ~isempty(cfg.maxF0) && isfinite(cfg.maxF0) && cfg.maxF0 > 0 && ...
+        isfinite(A0.f0) && A0.f0 > 0
+    ratio_cap = cfg.maxF0 / A0.f0;
+    if cfg.pitchRatio > ratio_cap
+        cfg.pitchRatio = ratio_cap;
+        capped = true;
+    end
+end
+cfg.pitchCapped = capped;
+
 cfg.pitchRatio = max(0.4, min(2.2, cfg.pitchRatio));
 r = cfg.pitchRatio;
 
@@ -333,6 +383,7 @@ info = struct('fs', fs, 'n', n, 'preset', preset, 'f0_in', A0.f0, ...
     'formant_scale_applied', Fratio / r, 'tilt_db_oct', cfg.tilt, ...
     'tremor_pct', cfg.tremor, 'breath_pct', cfg.breath, ...
     'target_f0', NaN, 'pitch_ref', cfg.pitchRef, 'outfile', outName, ...
+    'max_f0', cfg.maxF0, 'pitch_capped', cfg.pitchCapped, ...
     'time_analyze', tAnalyze, 'time_process', tProcess, 'time_total', toc(t_all));
 if strcmp(cfg.pitchMode, 'abs')
     info.target_f0 = cfg.pitchTarget;
@@ -427,10 +478,11 @@ fprintf('\n[voice_changer] preset=%s   in=%s\n', info.preset, ...
 fprintf('  analysis : F0 = %6.1f Hz, voiced %4.0f%%, centroid %5.0f Hz, %.1f ms\n', ...
         A0.f0, 100 * A0.voiced, A0.cent, 1000 * info.time_analyze);
 if isfinite(info.target_f0)
-    fprintf('  pitch    : F0 x%.3f  (target %.0f Hz)  ->  %s\n', ...
-            info.pitch_ratio, info.target_f0, f0_text(info.f0_out));
+    fprintf('  pitch    : F0 x%.3f  (target %.0f Hz)%s  ->  %s\n', ...
+            info.pitch_ratio, info.target_f0, capnote(info), f0_text(info.f0_out));
 else
-    fprintf('  pitch    : F0 x%.3f  ->  %s\n', info.pitch_ratio, f0_text(info.f0_out));
+    fprintf('  pitch    : F0 x%.3f%s  ->  %s\n', ...
+            info.pitch_ratio, capnote(info), f0_text(info.f0_out));
 end
 fprintf('  formant  : final x%.3f (envelope scaled x%.3f before the pitch shift)\n', ...
         info.formant_ratio, info.formant_scale_applied);
@@ -452,6 +504,16 @@ if args.plot
     plot_report(inName, info);
 end
 fprintf('\n');
+end
+
+function s = capnote(info)
+%CAPNOTE  "" or " [capped at N Hz]" for the pitch line of the report.
+if isfield(info, 'pitch_capped') && info.pitch_capped && isfield(info, 'max_f0') ...
+        && ~isempty(info.max_f0)
+    s = sprintf('  [capped at %.0f Hz]', info.max_f0);
+else
+    s = '';
+end
 end
 
 function s = f0_text(f0)
@@ -511,8 +573,8 @@ fprintf(['voice_changer - command line voice changer (normal / child / elderly)\
     '\n' ...
     'presets: child | child_female | elder | elder_male | elder_female | normal\n' ...
     'options: --pitch <semitones>  --target <Hz>  --ratio <r>  --ref <Hz>\n' ...
-    '         --formant <r>  --tilt <dB/oct>  --tremor <pct>  --rate <Hz>\n' ...
-    '         --breath <pct>  --fs <Hz>  --nfft <n>  --hop <n>\n' ...
+    '         --max-f0 <Hz>  --formant <r>  --tilt <dB/oct>  --tremor <pct>\n' ...
+    '         --rate <Hz>  --breath <pct>  --fs <Hz>  --nfft <n>  --hop <n>\n' ...
     '         --target-level <dBFS>  --no-normalize  --plot  --quiet\n' ...
     '\n' ...
     'conversion = pitch shift (phase vocoder) + formant warp (cepstral envelope)\n' ...
