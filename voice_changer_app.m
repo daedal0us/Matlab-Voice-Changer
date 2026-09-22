@@ -304,17 +304,14 @@ classdef voice_changer_app < matlab.apps.AppBase
             app.PlayBButton.Enable = 'on';
             if isfinite(info.f0_out)
                 f0txt = sprintf('%.1f Hz', info.f0_out);
-            elseif isfield(info, 'f0_measured') && isfinite(info.f0_measured) && ...
-                    isfield(info, 'f0_expected') && isfinite(info.f0_expected)
-                % The tracker reads converted audio poorly (see the LIMITATION
-                % note in VC_ANALYZE).  Show its answer next to what the
-                % conversion produces rather than hiding both: the conversion is
-                % exact, the measurement is not, and the user needs to be able
-                % to tell those apart.
-                f0txt = sprintf('估计不可靠（测到 %.0f Hz，本次转换应为 %.0f Hz）', ...
-                    info.f0_measured, info.f0_expected);
+            elseif isfield(info, 'f0_expected') && isfinite(info.f0_expected)
+                % The confirmation search found no periodicity where the
+                % conversion must have put it.  Print the DESIGNED value - the
+                % conversion factors are exact by construction - but never as if
+                % it had been measured.
+                f0txt = sprintf('%.0f Hz（设计值，未直接验证）', info.f0_expected);
             else
-                f0txt = '估计不可靠（未找到可用周期）';
+                f0txt = '不可估计（输入基频也未测出）';
             end
             note = '';
             if isfield(info, 'pitch_down_limited') && info.pitch_down_limited

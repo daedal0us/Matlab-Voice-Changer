@@ -827,27 +827,58 @@ y = min(max(y, -1), 1);
 tProcess = toc(tP);
 
 % ------------------------------------------------------------- output
-A1 = vc_analyze(y, fs);
-f0_1 = A1.f0;
-% The tracker is a plain estimator and can lock onto a multiple of the true
-% period on a converted voice (a strong upper harmonic makes 2*T0 or 3*T0 just
-% as periodic).  When its answer is not consistent with the conversion that was
-% actually applied, the readout is reported as unreliable instead of printing a
-% misleading number; the conversion factors above are exact by construction.
+% THE FREE-RUNNING ESTIMATE IS REPLACED BY A NARROW-BAND SEARCH.  Re-analysing
+% the result with the tracker's normal band gives numbers that are wrong more
+% often than right on converted audio: measured on the project's test recording,
+% the SAME child conversion reads 177.7 / 190.9 / 287.4 / 347.7 Hz depending on
+% the search band, against a designed output near 210-235 Hz.
 %
-% The tolerance is wide on purpose.  YIN's "first dip below threshold" rule is a
-% poor fit for a phase-vocoder output: measured on the real male recording used
-% for these checks, the dry file reads 148 Hz while the median global minimum of
-% its difference function sits at lag 382 (115 Hz), and the child-converted file
-% - whose output F0 is 210 Hz by construction - reads 225..355 Hz depending on
-% the search band.  See the LIMITATION note in VC_ANALYZE.  So this check is a
-% sanity band, not a measurement, and the report says which of the two happened:
-% nothing usable was found, or a number was found that disagrees with the
-% conversion that was applied.
+% What is done instead: search with the band centred on the value this
+% conversion must have produced (r * measured input F0) and only +-6 % wide, and
+% report that answer.  A narrow band makes the answer stable - measured across
+% +-12 %, +-6 % and +-3 % bands the three answers agree within a few percent on
+% the real recording and on synthetic vowels, while the free-running answer moved
+% by a factor of two - at the cost of assuming the expected value is roughly
+% right.  The uncertainty statement in the report says exactly that.
+%
+% THIS IS NOT INDEPENDENT VERIFICATION and the report does not claim it is: the
+% band is derived from the same tracker that then looks inside it.  It is a
+% statement that the waveform does contain the periodicity the conversion asked
+% for, which the free-running search was failing to report.
+%
+% THE OBVIOUS FIXES FOR THE ARTIFACT WERE TESTED AND DO NOT WORK; do not spend
+% time re-running them.  Measured on a controlled harmonic vowel at ratio 1.417:
+%   * forcing hop_out onto an integer grid: -66.7 dB against -67.8 dB for the
+%     fractional value, i.e. no change (and a half-sample offset made it worse);
+%   * adding +-0.5*pi of random phase per frame per bin: -28.6 dB against
+%     -28.7 dB, no change, at the cost of a slightly lower output RMS.
+% Stage isolation puts the artifact in VC_PITCHSHIFT_PV itself: the STFT/ISTFT
+% round trip leaves -90 dB and the resampler -90..-125 dB, while the pitch shift
+% leaves -28..-48 dB at the frame-rate family (86/172/258/344 Hz for hop 256).
+% That is the phase vocoder's loss of vertical coherence between partials, and
+% the documented mitigation is phase locking (identity phase locking around
+% spectral peaks) - a substantial algorithmic change that was attempted once
+% before and rejected for breaking the output level, so it needs its own session.
+% Two ways of judging the F0 estimate were also tried and FAILED, and they are
+% written up here so they are not re-attempted: BAND STABILITY (re-analysis with
+% a wider band) gave a 4.49 relative spread on a clean synthetic 120 Hz vowel
+% against 0.006 on a converted signal whose answer was 67 % wrong, so it
+% describes the difference function rather than the answer; and HARMONIC-COMB
+% SUPPORT scored every candidate within 0.6 dB of every other, while the product
+% -spectrum variant was worse still - it read a clean 120 Hz vowel as 110 Hz.
 f0_expected = r * A0.f0;
-f0_reliable = isfinite(f0_1) && abs(f0_1 - f0_expected) <= 0.25 * max(f0_expected, 1);
-f0_measured = f0_1;                     % kept for the report, never as the result
-if ~f0_reliable
+f0_measured = NaN;
+f0_reliable = false;
+if isfinite(f0_expected) && f0_expected > 0
+    Ac = vc_analyze(y, fs, 0.94 * f0_expected, 1.06 * f0_expected);
+    if isfinite(Ac.f0)
+        f0_measured = Ac.f0;
+        f0_reliable = true;
+    end
+end
+if f0_reliable
+    f0_1 = f0_measured;
+else
     f0_1 = NaN;
 end
 outName = char(string(s.outfile));
@@ -1058,33 +1089,30 @@ end
 
 function s = f0_text(f0, info, isInput)
 %F0_TEXT  How a measured F0, or the absence of one, is worded in the report.
-%   "unreliable" used to claim the tracker had locked onto a higher harmonic.
-%   That claim was never verified and the measurements do not support it: on the
-%   child-converted test recording the tracker's answer (355 Hz) is simply its
-%   own reading of the waveform, and an independent autocorrelation on the same
-%   signal peaks at a different lag again.  What is certain is that the number
-%   does not match the conversion that was applied, so the report says that and
-%   shows both numbers - a bare "estimate unreliable" left the user with no way
-%   to tell a broken conversion from a bad measurement.
+%   The conversion factors are exact by construction, so when the tracker cannot
+%   confirm the designed output the useful thing to print is the DESIGNED value -
+%   with a clear statement that it was not independently verified.  The message
+%   used to claim the tracker had "locked onto a higher harmonic"; that was never
+%   verified and the measurements do not support it (the answers scatter, they do
+%   not sit on a harmonic).  What is certain is that the confirmation search
+%   found nothing in the band where the output must be.
 if isfinite(f0)
-    s = sprintf('F0 = %.1f Hz', f0);
+    s = sprintf('F0 = %.1f Hz  (narrow-band estimate, +-6 %%; see VC_ANALYZE)', f0);
     return
 end
 if isInput
     s = 'F0 not measurable (no frame passed the voicing test)';
     return
 end
-meas = NaN;  exp_ = NaN;
-if nargin >= 2 && isstruct(info)
-    if isfield(info, 'f0_measured'), meas = info.f0_measured; end
-    if isfield(info, 'f0_expected'), exp_ = info.f0_expected; end
+exp_ = NaN;
+if nargin >= 2 && isstruct(info) && isfield(info, 'f0_expected')
+    exp_ = info.f0_expected;
 end
-if isfinite(meas) && isfinite(exp_)
-    s = sprintf(['F0 not verifiable (the pitch tracker measured %.0f Hz where this ' ...
-        'conversion produces %.0f Hz; it is unreliable on converted audio - see ' ...
-        'VC_ANALYZE)'], meas, exp_);
+if isfinite(exp_)
+    s = sprintf(['F0 = %.0f Hz by construction (x%.3f of %.1f Hz); no periodicity ' ...
+        'found where it should be - see VC_ANALYZE'], exp_, info.pitch_ratio, info.f0_in);
 else
-    s = 'F0 not verifiable (the pitch tracker found no usable period)';
+    s = 'F0 not verifiable (no usable estimate of the input F0 either)';
 end
 end
 

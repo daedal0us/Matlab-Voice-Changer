@@ -182,18 +182,15 @@ end
 % ======================================================================
 function s = f0_txt(info)
 %F0_TXT  The F0 readout for the one-line summary, or why there is none.
-%   "unreliable (estimator limitation)" was accurate but told the user nothing
-%   about which part was unreliable.  Show the tracker's own answer next to the
-%   value the conversion produces, so a poor measurement is never mistaken for a
-%   failed conversion.
+%   When the confirmation search finds no periodicity where the conversion must
+%   have put it, the designed value is still worth printing - the conversion
+%   factors are exact by construction - but it must not look like a measurement.
 if isfinite(info.f0_out)
     s = sprintf('%.1f Hz', info.f0_out);
     return
 end
-if isfield(info, 'f0_measured') && isfinite(info.f0_measured) && ...
-        isfield(info, 'f0_expected') && isfinite(info.f0_expected)
-    s = sprintf('%.0f Hz-measured-but-expected-%.0f (tracker unreliable on converted audio)', ...
-        info.f0_measured, info.f0_expected);
+if isfield(info, 'f0_expected') && isfinite(info.f0_expected)
+    s = sprintf('%.0f Hz-designed-not-verified', info.f0_expected);
 else
     s = 'not measurable (no voiced frame found)';
 end
